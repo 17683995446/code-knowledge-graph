@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>代码知识图谱系统 - Code Knowledge Graph</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- 顶部导航 -->
+<nav class="top-navigation">
+    <div class="brand-logo">
+        <div class="brand-icon">&#x1F310;</div>
+        <span>代码知识图谱</span>
+    </div>
+    <div class="nav-tabs">
+        <button class="nav-tab active" data-page="dashboard">仪表盘</button>
+        <button class="nav-tab" data-page="graph">知识图谱</button>
+        <button class="nav-tab" data-page="dependency">依赖图</button>
+        <button class="nav-tab" data-page="architecture">架构图</button>
+        <button class="nav-tab" data-page="flow">流程图</button>
+        <button class="nav-tab" data-page="sequence">时序图</button>
+        <button class="nav-tab" data-page="files">文件列表</button>
+        <button class="nav-tab" data-page="analysis">AI分析</button>
+    </div>
+    <div class="nav-status">
+        <div class="status-indicator">
+            <div class="status-dot" id="connection-dot"></div>
+            <span id="connection-text">连接中...</span>
+        </div>
+        <button class="btn-secondary" onclick="triggerFullSync()" style="padding:4px 12px;font-size:12px;">重新同步</button>
+    </div>
+</nav>
+
+<!-- 主内容 -->
+<main class="main-content">
+
+    <!-- ==================== 仪表盘 ==================== -->
+    <section id="page-dashboard" class="page-section active">
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">文件总数</div>
+                <div class="stat-value" id="stat-files">0</div>
+                <div class="stat-sub">已索引代码文件</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">类型总数</div>
+                <div class="stat-value" id="stat-types">0</div>
+                <div class="stat-sub">class/interface/struct/enum</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">函数总数</div>
+                <div class="stat-value" id="stat-functions">0</div>
+                <div class="stat-sub">methods/functions</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">调用关系</div>
+                <div class="stat-value" id="stat-calls">0</div>
+                <div class="stat-sub">function calls</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">引用关系</div>
+                <div class="stat-value" id="stat-references">0</div>
+                <div class="stat-sub">inherit/implement/import</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">更新次数</div>
+                <div class="stat-value" id="stat-updates">0</div>
+                <div class="stat-sub">增量更新</div>
+            </div>
+        </div>
+
+        <div class="two-column-layout">
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">语言分布</div>
+                </div>
+                <div id="language-chart"></div>
+            </div>
+            <div class="chart-container">
+                <div class="chart-header">
+                    <div class="chart-title">类型分布</div>
+                </div>
+                <div id="type-chart"></div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-header">
+                <div class="chart-title">引用关系分布</div>
+            </div>
+            <div id="reference-chart"></div>
+        </div>
+
+        <div class="event-log">
+            <div class="event-log-header">
+                <span>实时事件日志</span>
+                <span style="font-size:12px;color:var(--text-muted);" id="event-count">0 条记录</span>
+            </div>
+            <div class="event-log-list" id="event-log-list"></div>
+        </div>
+    </section>
+
+    <!-- ==================== 知识图谱 ==================== -->
+    <section id="page-graph" class="page-section">
+        <div class="chart-container">
+            <div class="chart-header">
+                <div class="chart-title">代码知识图谱</div>
+                <div class="chart-actions">
+                    <button class="chart-action-btn" onclick="graphScale=1;graphOffsetX=0;graphOffsetY=0;renderKnowledgeGraph();">重置视图</button>
+                </div>
+            </div>
+            <div class="graph-canvas-wrapper">
+                <canvas id="knowledge-graph-canvas" class="graph-canvas"></canvas>
+                <div class="graph-legend">
+                    <div class="legend-item"><div class="legend-color" style="background:#3b82f6;"></div>类型</div>
+                    <div class="legend-item"><div class="legend-color" style="background:#10b981;"></div>函数</div>
+                    <div class="legend-item"><div class="legend-color" style="background:#f59e0b;"></div>调用</div>
+                    <div class="legend-item"><div class="legend-color" style="background:#8b5cf6;"></div>继承</div>
+                    <div class="legend-item"><div class="legend-color" style="background:#ec4899;"></div>实现</div>
+                    <div class="legend-item"><div class="legend-color" style="background:#06b6d4;"></div>导入</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ==================== 依赖图 ==================== -->
+    <section id="page-dependency" class="page-section">
+        <div class="chart-container">
+            <div class="chart-header">
+                <div class="chart-title">文件依赖关系图</div>
+                <button class="btn-secondary" onclick="analyzeDependencies()" style="padding:4px 12px;font-size:12px;">AI分析依赖</button>
+            </div>
+            <div id="dependency-graph-canvas" style="min-height:500px;"></div>
+        </div>
+        <div class="analysis-panel" style="margin-top:24px;">
+            <div class="analysis-header">
+                <span class="analysis-icon">&#x1F916;</span>
+                <span class="analysis-title">AI依赖分析</span>
+            </div>
+            <div id="dependency-analysis-result">
+                <div style="color:var(--text-muted);font-size:14px;">点击上方"AI分析依赖"按钮开始分析</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ==================== 架构图 ==================== -->
+    <section id="page-architecture" class="page-section">
+        <div class="chart-container">
+            <div class="chart-header">
+                <div class="chart-title">系统架构图</div>
+                <span style="font-size:12px;color:var(--text-muted);">基于第一性原理的全语言通用架构</span>
+            </div>
+            <div class="architecture-diagram">
+                <div class="arch-flow">
+                    <div class="arch-node">
+                        <div class="arch-node-icon">&#x1F4C1;</div>
+                        <div class="arch-node-title">代码文件变更</div>
+                        <div class="arch-node-desc">任意语言源文件</div>
+                    </div>
+                    <div class="arch-arrow">&#x27A1;</div>
+                    <div class="arch-node">
+                        <div class="arch-node-icon">&#x1F50D;</div>
+                        <div class="arch-node-title">跨平台文件监控</div>
+                        <div class="arch-node-desc">watchdog实时监控</div>
+                    </div>
+                    <div class="arch-arrow">&#x27A1;</div>
+                    <div class="arch-node">
+                        <div class="arch-node-icon">&#x23F3;</div>
+                        <div class="arch-node-title">防抖合并队列</div>
+                        <div class="arch-node-desc">1秒窗口合并</div>
+                    </div>
+                    <div class="arch-arrow">&#x27A1;</div>
+                    <div class="arch-node">
+                        <div class="arch-node-icon">&#x2699;</div>
+                        <div class="arch-node-title">增量更新引擎</div>
+                        <div class="arch-node-desc">删旧+插新</div>
+                    </div>
+                    <div class="arch-arrow">&#x27A1;</div>
+                    <div class="arch-node">
+                        <div class="arch-node-icon">&#x1F5C4;</div>
+                        <div class="arch-node-title">SQLite数据库</div>
+                        <div class="arch-node-desc">知识图谱存储</div>
+                    </div>
+                </div>
+
+                <div style="text-align:center;margin:40px 0 20px;font-size:14px;color:var(--text-muted);">增量更新引擎内部结构</div>
+
+                <div style="display:flex;justify-content:center;gap:40px;flex-wrap:wrap;">
+                    <div class="arch-node" style="border-color:var(--primary-color);">
+                        <div class="arch-node-icon">&#x1F4D6;</div>
+                        <div class="arch-node-title">通用解析器接口</div>
+                        <div class="arch-node-desc">BaseParser.parse_file()</div>
+                    </div>
+                </div>
+
+                <div style="text-align:center;margin:20px 0;font-size:24px;color:var(--primary-color);">&#x2B06;</div>
+
+                <div class="arch-flow">
+                    <div class="arch-node" style="border-color:#3572A5;">
+                        <div class="arch-node-icon">&#x1F40D;</div>
+                        <div class="arch-node-title">Python解析器</div>
+                        <div class="arch-node-desc">ast标准库</div>
+                    </div>
+                    <div class="arch-node" style="border-color:#f1e05a;">
+                        <div class="arch-node-icon">&#x1F4A1;</div>
+                        <div class="arch-node-title">JavaScript解析器</div>
+                        <div class="arch-node-desc">正则+语法分析</div>
+                    </div>
+                    <div class="arch-node" style="border-color:#b07219;">
+                        <div class="arch-node-icon">&#x2615;</div>
+                        <div class="arch-node-title">Java解析器</div>
+                        <div class="arch-node-desc">正则+语法分析</div>
+                    </div>
+                    <div class="arch-node" style="border-color:#00ADD8;">
+                        <div class="arch-node-icon">&#x1F420;</div>
+                        <div class="arch-node-title">Go解析器</div>
+                        <div class="arch-node-desc">正则+语法分析</div>
+                    </div>
+                    <div class="arch-node" style="border-color:var(--text-muted);">
+                        <div class="arch-node-icon">&#x2795;</div>
+                        <div class="arch-node-title">更多语言...</div>
+                        <div class="arch-node-desc">实现接口即可</div>
+                    </div>
+                </div>
+
+                <div style="text-align:center;margin:40px 0 20px;font-size:14px;color:var(--text-muted);">数据流输出</div>
+
+                <div class="arch-flow">
+                    <div class="arch-node" style="border-color:var(--success-color);">
+                        <div class="arch-node-icon">&#x1F4CA;</div>
+                        <div class="arch-node-title">REST API</div>
+                        <div class="arch-node-desc">FastAPI数据接口</div>
+                    </div>
+                    <div class="arch-arrow">&#x27A1;</div>
+                    <div class="arch-node" style="border-color:var(--warning-color);">
+                        <div class="arch-node-icon">&#x1F517;</div>
+                        <div class="arch-node-title">WebSocket</div>
+                        <div class="arch-node-desc">实时推送更新</div>
+                    </div>
+                    <div class="arch-arrow">&#x27A1;</div>
+                    <div class="arch-node" style="border-color:var(--secondary-color);">
+                        <div class="arch-node-icon">&#x1F3AC;</div>
+                        <div class="arch-node-title">可视化仪表盘</div>
+                        <div class="arch-node-desc">交互式图谱展示</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-header">
+                <div class="chart-title">数据模型</div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;">
+                <div style="background:var(--bg-primary);border-radius:8px;padding:16px;border:1px solid var(--border-color);">
+                    <div style="color:#3b82f6;font-weight:600;margin-bottom:8px;">&#x1F4C1; files</div>
+                    <div style="font-size:12px;color:var(--text-muted);font-family:monospace;line-height:1.8;">
+                        id INTEGER PK<br>
+                        path TEXT UNIQUE<br>
+                        language TEXT<br>
+                        hash BLOB<br>
+                        modified INTEGER
+                    </div>
+                </div>
+                <div style="background:var(--bg-primary);border-radius:8px;padding:16px;border:1px solid var(--border-color);">
+                    <div style="color:#3b82f6;font-weight:600;margin-bottom:8px;">&#x1F4E6; types</div>
+                    <div style="font-size:12px;color:var(--text-muted);font-family:monospace;line-height:1.8;">
+                        id INTEGER PK<br>
+                        name TEXT<br>
+                        file_id INTEGER FK<br>
+                        kind TEXT<br>
+                        flags INTEGER
+                    </div>
+                </div>
+                <div style="background:var(--bg-primary);border-radius:8px;padding:16px;border:1px solid var(--border-color);">
+                    <div style="color:#10b981;font-weight:600;margin-bottom:8px;">&#x1F527; functions</div>
+                    <div style="font-size:12px;color:var(--text-muted);font-family:monospace;line-height:1.8;">
+                        id INTEGER PK<br>
+                        name TEXT<br>
+                        type_id INTEGER FK<br>
+                        file_id INTEGER FK
+                    </div>
+                </div>
+                <div style="background:var(--bg-primary);border-radius:8px;padding:16px;border:1px solid var(--border-color);">
+                    <div style="color:#f59e0b;font-weight:600;margin-bottom:8px;">&#x1F517; calls</div>
+                    <div style="font-size:12px;color:var(--text-muted);font-family:monospace;line-height:1.8;">
+                        caller_id INTEGER FK<br>
+                        callee_id INTEGER FK<br>
+                        PRIMARY KEY(caller, callee)
+                    </div>
+                </div>
+                <div style="background:var(--bg-primary);border-radius:8px;padding:16px;border:1px solid var(--border-color);">
+                    <div style="color:#8b5cf6;font-weight:600;margin-bottom:8px;">&#x1F517; references</div>
+                    <div style="font-size:12px;color:var(--text-muted);font-family:monospace;line-height:1.8;">
+                        from_id INTEGER FK<br>
+                        to_id INTEGER FK<br>
+                        kind TEXT<br>
+                        PRIMARY KEY(from, to, kind)
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ==================== 流程图 ==================== -->
+    <section id="page-flow" class="page-section">
+        <div class="chart-container">
+            <div class="chart-header">
+                <div class="chart-title">系统启动流程图</div>
+            </div>
+            <div class="flow-diagram">
+                <div class="flow-step">
+                    <div class="flow-step-number">1</div>
+                    <div class="flow-step-content">
+                        <div class="flow-step-title">初始化数据库</div>
+                        <div class="flow-step-desc">创建SQLite数据库，初始化表结构（files/types/functions/calls/references），启用WAL模式提升并发性能</div>
+                    </div>
+                </div>
+                <div class="flow-connector"></div>
+                <div class="flow-step">
+                    <div class="flow-step-number">2</div>
+                    <div class="flow-step-content">
+                        <div class="flow-step-title">注册语言解析器</div>
+                        <div class="flow-step-desc">通过ParserRegistry注册所有内置解析器（Python/JavaScript/Java/Go），解析器实现统一BaseParser接口</div>
+                    </div>
+                </div>
+                <div class="flow-connector"></div>
+                <div class="flow-step">
+                    <div class="flow-step-number">3</div>
+                    <div class="flow-step-content">
+                        <div class="flow-step-title">执行首次全量同步</div>
+                        <div class="flow-step-desc">递归扫描项目目录，按扩展名识别语言，计算MD5哈希，调用对应解析器解析所有代码文件，构建完整知识图谱</div>
+                    </div>
+                </div>
+                <div class="flow-connector"></div>
+                <div class="flow-step">
+                    <div class="flow-step-number">4</div>
+                    <div class="flow-step-content">
+                        <div class="flow-step-title">启动文件监控</div>
+                        <div class="flow-step-desc">使用watchdog启动跨平台文件系统监控，递归监听项目目录的所有代码文件变更事件</div>
+                    </div>
+                </div>
+                <div class="flow-connector"></div>
+                <div class="flow-step">
+                    <div class="flow-step-number">5</div>
+                    <div class="flow-step-content">
+                        <div class="flow-step-title">启动Web服务</div>
+                        <div class="flow-step-desc">启动FastAPI Web服务器，提供REST API接口和WebSocket实时推送，加载可视化前端页面</div>
+                    </div>
+                </div>
+                <div class="flow-connector"></div>
+                <div class="flow-step">
+                    <div class="flow-step-number">6</div>
+                    <div class="flow-step-content">
+                        <div class="flow-step-title">进入增量更新循环</div>
+                        <div class="flow-step-desc">文件变更 → 防抖合并(1秒窗口) → 增量更新数据库 → WebSocket推送 → 前端实时刷新</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-header">
+                <div class="chart-title">增量更新流程图</div>
+            </div>
+            <div class="flow-diagram">
+                <div class="flow-step">
+                    <div class="flow-step-number">1</div>
+                    <div class="flow-step-content">
+                        <div class="flow-step-title">文件变更事件</div>
+                        <div class="flow-step-desc">watchdog检测到文件创建/修改/删除事件</div>
+                    </div>
+                </div>
+                <div class="flow-connector"></div>
+                <div class="flow-step">
+                    <div class="flow-step-number">2</div>
+                    <div class="flow-step-content">
+                        <div class="flow-step-title">进入防抖队列</div>
+                        <div class="flow-step-desc">事件加入DebounceQueue，1秒窗口内的多次变更合并为一次批量处理</div>
+                    </div>
+                </div>
+                <div class="flow-connector"></div>
+                <div class="flow-step">
+                    <div class="flow-step-number">3</div>
+                    <div class="flow-step-content">
+                        <div class="flow-step-title">解析事件类型</div>
+                        <div class="flow-step-desc">合并后的事件类型解析：deleted优先 > created > modified</div>
+                    </div>
+                </div>
+                <div class="flow-connector"></div>
+                <div class="flow-step">
+                    <div class="flow-step-number">4</div>
+                    <div class="flow-step-content">
+                        <div class="flow-step-title">删除旧数据（修改/删除时）</div>
+                        <div class="flow-step-desc">级联删除：先删calls/references关系 → 再删functions → 再删types → 最后删files记录</div>
+                    </div>
+                </div>
+                <div class="flow-connector"></div>
+                <div class="flow-step">
+                    <div class="flow-step-number">5</div>
+                    <div class="flow-step-content">
+                        <div class="flow-step-title">解析并插入新数据（新增/修改时）</div>
+                        <div class="flow-step-desc">检测语言类型 → 调用对应解析器 → 插入files记录 → 插入types → 插入functions → 插入calls/references</div>
+                    </div>
+                </div>
+                <div class="flow-connector"></div>
+                <div class="flow-step">
+                    <div class="flow-step-number">6</div>
+                    <div class="flow-step-content">
+                        <div class="flow-step-title">通知前端更新</div>
+                        <div class="flow-step-desc">通过WebSocket广播更新通知，前端自动刷新知识图谱和统计数据</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ==================== 时序图 ==================== -->
+    <section id="page-sequence" class="page-section">
+        <div class="chart-container">
+            <div class="chart-header">
+                <div class="chart-title">文件变更处理时序图</div>
+            </div>
+            <div class="sequence-diagram">
+                <div class="sequence-participants">
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#f59e0b;">开发者</div>
+                        <div class="participant-lifeline"></div>
+                    </div>
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#3b82f6;">文件系统</div>
+                        <div class="participant-lifeline"></div>
+                    </div>
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#10b981;">watchdog</div>
+                        <div class="participant-lifeline"></div>
+                    </div>
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#8b5cf6;">防抖队列</div>
+                        <div class="participant-lifeline"></div>
+                    </div>
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#ec4899;">更新引擎</div>
+                        <div class="participant-lifeline"></div>
+                    </div>
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#06b6d4;">解析器</div>
+                        <div class="participant-lifeline"></div>
+                    </div>
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#f97316;">SQLite</div>
+                        <div class="participant-lifeline"></div>
+                    </div>
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#ef4444;">WebSocket</div>
+                        <div class="participant-lifeline"></div>
+                    </div>
+                </div>
+
+                <div style="max-width:900px;margin:0 auto;">
+                    <div class="sequence-message" style="margin-left:5%;width:15%;">
+                        <div class="message-label">1. 修改代码文件</div>
+                        <div class="message-line"><div class="message-arrow"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:15%;width:10%;">
+                        <div class="message-label">2. 文件变更事件</div>
+                        <div class="message-line"><div class="message-arrow"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:25%;width:15%;">
+                        <div class="message-label">3. 转发事件</div>
+                        <div class="message-line"><div class="message-arrow"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:40%;width:5%;background:rgba(139,92,246,0.1);padding:8px;border-radius:4px;text-align:center;">
+                        <div class="message-label" style="position:static;transform:none;background:none;">等待1秒防抖窗口</div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:45%;width:15%;">
+                        <div class="message-label">4. 批量变更事件</div>
+                        <div class="message-line"><div class="message-arrow"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:60%;width:10%;">
+                        <div class="message-label">5. 调用解析器</div>
+                        <div class="message-line"><div class="message-arrow"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:70%;width:10%;">
+                        <div class="message-label">6. 返回ParseResult</div>
+                        <div class="message-line return"><div class="message-arrow left"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:60%;width:15%;">
+                        <div class="message-label">7. 删旧+插新</div>
+                        <div class="message-line"><div class="message-arrow"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:75%;width:10%;">
+                        <div class="message-label">8. 推送更新</div>
+                        <div class="message-line"><div class="message-arrow"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:85%;width:10%;">
+                        <div class="message-label">9. 实时刷新</div>
+                        <div class="message-line"><div class="message-arrow"></div></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-header">
+                <div class="chart-title">全量同步时序图</div>
+            </div>
+            <div class="sequence-diagram">
+                <div class="sequence-participants">
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#f59e0b;">系统启动</div>
+                        <div class="participant-lifeline" style="height:200px;"></div>
+                    </div>
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#3b82f6;">扫描器</div>
+                        <div class="participant-lifeline" style="height:200px;"></div>
+                    </div>
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#ec4899;">更新引擎</div>
+                        <div class="participant-lifeline" style="height:200px;"></div>
+                    </div>
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#06b6d4;">解析器</div>
+                        <div class="participant-lifeline" style="height:200px;"></div>
+                    </div>
+                    <div class="sequence-participant">
+                        <div class="participant-box" style="border-color:#f97316;">SQLite</div>
+                        <div class="participant-lifeline" style="height:200px;"></div>
+                    </div>
+                </div>
+                <div style="max-width:800px;margin:0 auto;">
+                    <div class="sequence-message" style="margin-left:5%;width:15%;">
+                        <div class="message-label">1. 递归扫描项目目录</div>
+                        <div class="message-line"><div class="message-arrow"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:20%;width:15%;">
+                        <div class="message-label">2. 返回所有代码文件列表</div>
+                        <div class="message-line return"><div class="message-arrow left"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:20%;width:15%;">
+                        <div class="message-label">3. 逐文件更新</div>
+                        <div class="message-line"><div class="message-arrow"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:35%;width:15%;">
+                        <div class="message-label">4. 调用语言解析器</div>
+                        <div class="message-line"><div class="message-arrow"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:50%;width:15%;">
+                        <div class="message-label">5. 返回实体与关系</div>
+                        <div class="message-line return"><div class="message-arrow left"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:35%;width:20%;">
+                        <div class="message-label">6. 存入知识图谱数据库</div>
+                        <div class="message-line"><div class="message-arrow"></div></div>
+                    </div>
+                    <div class="sequence-message" style="margin-left:55%;width:15%;">
+                        <div class="message-label">7. 返回同步结果</div>
+                        <div class="message-line return"><div class="message-arrow left"></div></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ==================== 文件列表 ==================== -->
+    <section id="page-files" class="page-section">
+        <div class="file-list-container">
+            <div class="file-list-header">
+                <span style="font-size:16px;font-weight:600;">已索引文件</span>
+                <input type="text" class="file-search" placeholder="搜索文件..." id="file-search-input" oninput="filterFiles(this.value)">
+            </div>
+            <div class="file-list" id="file-list"></div>
+        </div>
+    </section>
+
+    <!-- ==================== AI分析 ==================== -->
+    <section id="page-analysis" class="page-section">
+        <div class="two-column-layout">
+            <div class="analysis-panel">
+                <div class="analysis-header">
+                    <span class="analysis-icon">&#x1F916;</span>
+                    <span class="analysis-title">代码结构分析</span>
+                </div>
+                <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;">
+                    基于硅基流动LLM，对当前项目的代码知识图谱进行智能分析，生成架构洞察和改进建议。
+                </p>
+                <button class="btn-primary" onclick="analyzeStructure()">开始分析</button>
+                <div id="analysis-result" style="margin-top:20px;"></div>
+            </div>
+            <div class="analysis-panel">
+                <div class="analysis-header">
+                    <span class="analysis-icon">&#x1F517;</span>
+                    <span class="analysis-title">依赖关系分析</span>
+                </div>
+                <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;">
+                    分析文件间的依赖关系，评估模块耦合度，发现潜在的循环依赖风险。
+                </p>
+                <button class="btn-primary" onclick="analyzeDependencies()">开始分析</button>
+                <div id="dependency-analysis-result" style="margin-top:20px;"></div>
+            </div>
+        </div>
+
+        <div class="chart-container" style="margin-top:24px;">
+            <div class="chart-header">
+                <div class="chart-title">设计原则</div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;">
+                <div style="background:var(--bg-primary);border-radius:8px;padding:20px;border-left:4px solid var(--primary-color);">
+                    <div style="font-weight:600;margin-bottom:8px;">语言无关原则</div>
+                    <div style="font-size:13px;color:var(--text-secondary);">所有语言共享同一套存储和更新机制，通过可插拔解析器支持新语言</div>
+                </div>
+                <div style="background:var(--bg-primary);border-radius:8px;padding:20px;border-left:4px solid var(--success-color);">
+                    <div style="font-weight:600;margin-bottom:8px;">原子文件更新</div>
+                    <div style="font-size:13px;color:var(--text-secondary);">每个文件独立更新，互不影响。一个文件的修改不会改变其他文件的内容</div>
+                </div>
+                <div style="background:var(--bg-primary);border-radius:8px;padding:20px;border-left:4px solid var(--warning-color);">
+                    <div style="font-weight:600;margin-bottom:8px;">增量更新</div>
+                    <div style="font-size:13px;color:var(--text-secondary);">只处理变更文件，永不全量重跑。99%的修改只涉及1-2个文件</div>
+                </div>
+                <div style="background:var(--bg-primary);border-radius:8px;padding:20px;border-left:4px solid var(--secondary-color);">
+                    <div style="font-weight:600;margin-bottom:8px;">删除重插</div>
+                    <div style="font-size:13px;color:var(--text-secondary);">更新 = 删除旧数据 + 插入新数据，简单可靠，避免复杂的diff算法</div>
+                </div>
+                <div style="background:var(--bg-primary);border-radius:8px;padding:20px;border-left:4px solid var(--danger-color);">
+                    <div style="font-weight:600;margin-bottom:8px;">实时响应</div>
+                    <div style="font-size:13px;color:var(--text-secondary);">用户改完代码最多等待2秒，防抖合并+增量更新确保极速响应</div>
+                </div>
+                <div style="background:var(--bg-primary);border-radius:8px;padding:20px;border-left:4px solid #06b6d4;">
+                    <div style="font-weight:600;margin-bottom:8px;">第一性原理</div>
+                    <div style="font-size:13px;color:var(--text-secondary);">代码是按文件组织的、由实体和关系组成的结构化系统，一次设计支持所有语言</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+</main>
+
+<!-- 文件详情侧边面板 -->
+<div class="detail-panel" id="detail-panel"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
