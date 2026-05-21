@@ -4,8 +4,11 @@ Python Parser - Python语言解析器
 """
 
 import ast
+import logging
 import os
 from typing import List, Optional, Set
+
+logger = logging.getLogger(__name__)
 
 from parsers.base_parser import (
     BaseParser, ParseResult, TypeInfo, FunctionInfo,
@@ -87,11 +90,37 @@ class PythonParser(BaseParser):
         return [".py"]
 
     def parse_file(self, file_path: str) -> ParseResult:
-        """解析Python文件"""
+        """解析Python文件
+        BUG-PY-01修复：尝试多种编码，而非仅utf-8
+        """
         result = ParseResult()
+        source_code = None
+
+        # BUG-PY-01修复：尝试多种编码
+        encodings = ["utf-8", "gbk", "gb2312", "latin-1", "cp1252"]
+        for encoding in encodings:
+            try:
+                with open(file_path, "r", encoding=encoding) as fh:
+                    source_code = fh.read()
+                logger.debug(f"成功使用编码 {encoding} 读取文件: {file_path}")
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                logger.warning(f"读取文件失败 {file_path} 使用编码 {encoding}: {e}")
+                continue
+
+        # 如果所有编码都失败，使用errors='ignore'作为最后手段
+        if source_code is None:
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
+                    source_code = fh.read()
+                logger.warning(f"使用errors='ignore'读取文件: {file_path}")
+            except Exception as e:
+                logger.error(f"无法读取文件 {file_path}: {e}")
+                return result
+
         try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
-                source_code = fh.read()
             if not source_code.strip():
                 return result
             tree = ast.parse(source_code, filename=file_path)

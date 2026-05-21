@@ -70,9 +70,12 @@ class UpdateEngine:
         self._loop = asyncio.get_running_loop()  # 保存事件循环引用
         while self._running:
             try:
-                # 非阻塞取出所有队列事件
-                while not self._event_queue.empty():
-                    file_path, event_type = self._event_queue.get_nowait()
+                # BUG-LOOP-01修复：使用try/except捕获queue.Empty，避免多线程下empty()不可靠
+                while True:
+                    try:
+                        file_path, event_type = self._event_queue.get_nowait()
+                    except Exception:
+                        break  # 队列为空，退出内层循环
                     with self._lock:
                         if file_path not in self._pending_events:
                             self._pending_events[file_path] = set()
@@ -86,8 +89,8 @@ class UpdateEngine:
                         self._pending_events.clear()
 
                     if batch:
-                        # 在线程池中执行同步IO操作，避免阻塞事件循环
-                        await asyncio.get_event_loop().run_in_executor(
+                        # BUG-LOOP-04修复：使用get_running_loop()替代已弃用的get_event_loop()
+                        await asyncio.get_running_loop().run_in_executor(
                             None, self._process_batch_sync, batch
                         )
 
@@ -147,10 +150,15 @@ class UpdateEngine:
         file_path = os.path.abspath(file_path)
 
         if event_type == "deleted":
-            file_record = self.database.get_file_by_path(file_path)
-            if file_record:
-                self.database.delete_file_cascade(file_record.file_id)
-                self.database.commit()
+            # BUG-SINGLE-01修复：添加异常保护，确保删除失败不导致整个批处理中断
+            try:
+                file_record = self.database.get_file_by_path(file_path)
+                if file_record:
+                    self.database.delete_file_cascade(file_record.file_id)
+                    self.database.commit()
+            except Exception as e:
+                logger.error(f"删除文件失败 {file_path}: {e}")
+                self.database.rollback()
             return
 
         if event_type in ("created", "modified"):
@@ -246,27 +254,60 @@ class UpdateEngine:
                 entity_id_map,
                 current_file_id=file_id
             )
+            # BUG-STORE-06修复：不在此处commit，由调用者_update_single_file统一控制事务边界
+            # 原commit()会破坏外层事务的rollback能力
 
     def full_sync(self):
-        """执行首次全量同步"""
+        """执行首次全量同步
+        BUG-FULL-SYNC-01修复：两阶段同步，确保跨文件引用能正确解析
+        BUG-UE-004修复：使用临时表备份策略，防止崩溃后数据全部丢失
+        第一阶段：提取所有文件的实体（types/functions/calls）
+        第二阶段：建立跨文件引用关系（references）
+        """
         logger.info(f"开始全量同步: {self.project_path}")
 
-        # 全量同步前清空所有关系数据，确保跨文件引用一致性
-        # 因为逐文件更新时，calls/references中的ID可能指向已被重建的实体
+        # BUG-UE-004修复：先将旧数据备份到临时表，成功后再删除
         conn = self.database._get_connection()
-        conn.execute("DELETE FROM calls")
-        conn.execute("DELETE FROM code_references")
-        conn.execute("DELETE FROM functions")
-        conn.execute("DELETE FROM types")
-        conn.execute("DELETE FROM files")
-        conn.commit()
+        try:
+            # 创建备份临时表
+            conn.execute("CREATE TABLE IF NOT EXISTS _backup_files AS SELECT * FROM files WHERE 0")
+            conn.execute("DELETE FROM _backup_files")
+            conn.execute("INSERT INTO _backup_files SELECT * FROM files")
+            conn.execute("CREATE TABLE IF NOT EXISTS _backup_types AS SELECT * FROM types WHERE 0")
+            conn.execute("DELETE FROM _backup_types")
+            conn.execute("INSERT INTO _backup_types SELECT * FROM types")
+            conn.execute("CREATE TABLE IF NOT EXISTS _backup_functions AS SELECT * FROM functions WHERE 0")
+            conn.execute("DELETE FROM _backup_functions")
+            conn.execute("INSERT INTO _backup_functions SELECT * FROM functions")
+            conn.execute("CREATE TABLE IF NOT EXISTS _backup_calls AS SELECT * FROM calls WHERE 0")
+            conn.execute("DELETE FROM _backup_calls")
+            conn.execute("INSERT INTO _backup_calls SELECT * FROM calls")
+            conn.execute("CREATE TABLE IF NOT EXISTS _backup_code_references AS SELECT * FROM code_references WHERE 0")
+            conn.execute("DELETE FROM _backup_code_references")
+            conn.execute("INSERT INTO _backup_code_references SELECT * FROM code_references")
+            conn.commit()
+            logger.debug("旧数据已备份到临时表")
+        except Exception as e:
+            logger.warning(f"备份数据失败（可能首次运行）: {e}")
+
+        # 清空现有数据
+        try:
+            conn.execute("DELETE FROM calls")
+            conn.execute("DELETE FROM code_references")
+            conn.execute("DELETE FROM functions")
+            conn.execute("DELETE FROM types")
+            conn.execute("DELETE FROM files")
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"全量同步清空数据失败: {e}")
+            return {"total": 0, "updated": 0}
 
         extensions_map = FileWatcher.get_language_extensions()
         extensions = set(extensions_map.keys())
 
-        total_files = 0
-        updated_files = 0
-
+        # 收集所有文件
+        all_files = []
         for root_dir, dir_names, file_names in os.walk(self.project_path):
             dir_names[:] = [
                 d for d in dir_names
@@ -277,18 +318,146 @@ class UpdateEngine:
             for file_name in file_names:
                 ext = os.path.splitext(file_name)[1].lower()
                 if ext in extensions:
-                    total_files += 1
-                    file_path = os.path.join(root_dir, file_name)
-                    try:
-                        self._update_single_file(file_path, "created")
-                        updated_files += 1
-                    except Exception as exception:
-                        logger.error(f"全量同步失败 {file_path}: {exception}")
+                    all_files.append(os.path.join(root_dir, file_name))
+
+        total_files = len(all_files)
+        updated_files = 0
+
+        # 第一阶段：提取所有实体（不建立跨文件引用）
+        logger.info(f"全量同步第一阶段: 提取{total_files}个文件的实体...")
+        parse_results = {}  # file_path -> (file_id, parse_result)
+        for file_path in all_files:
+            try:
+                file_id, parse_result = self._update_single_file_phase1(file_path)
+                if file_id:
+                    parse_results[file_path] = (file_id, parse_result)
+                    updated_files += 1
+            except Exception as exception:
+                logger.error(f"全量同步失败 {file_path}: {exception}")
+
+        # 第二阶段：建立跨文件引用关系
+        logger.info(f"全量同步第二阶段: 建立{updated_files}个文件的引用关系...")
+        for file_path, (file_id, parse_result) in parse_results.items():
+            try:
+                if parse_result and parse_result.references:
+                    self._store_references_only(file_id, parse_result)
+            except Exception as exception:
+                logger.error(f"引用关系建立失败 {file_path}: {exception}")
+
+        # BUG-UE-004修复：同步成功后删除备份表
+        try:
+            for table in ["_backup_files", "_backup_types", "_backup_functions",
+                          "_backup_calls", "_backup_code_references"]:
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
+            conn.commit()
+            logger.debug("备份表已清理")
+        except Exception as e:
+            logger.warning(f"清理备份表失败: {e}")
 
         self.stats["total_updates"] += 1
         self.stats["last_update_time"] = datetime.now().isoformat()
         logger.info(f"全量同步完成: 共{total_files}个文件, 成功{updated_files}个")
         return {"total": total_files, "updated": updated_files}
+
+    def _update_single_file_phase1(self, file_path: str, event_type: str = "created"):
+        """全量同步第一阶段：只提取实体，不建立跨文件引用"""
+        file_path = os.path.abspath(file_path)
+
+        language = FileWatcher.detect_language(file_path)
+        if not language:
+            return None, None
+
+        parse_result = None
+        try:
+            parser = self.parser_registry.get_parser(language)
+            if parser:
+                parse_result = parser.parse_file(file_path)
+        except Exception as e:
+            logger.warning(f"解析文件失败 {file_path}: {e}")
+            parse_result = None
+
+        file_hash = self.database.compute_file_hash(file_path)
+
+        try:
+            file_id = self.database.upsert_file(file_path, language, file_hash)
+
+            if parse_result:
+                # 只存储types和functions（不存储references）
+                type_id_map = {}
+                if parse_result.types:
+                    type_ids = self.database.insert_types(file_id, [
+                        {"name": t.name, "kind": t.kind, "flags": t.flags,
+                         "start_line": t.start_line, "end_line": t.end_line}
+                        for t in parse_result.types
+                    ])
+                    for type_info, type_id in zip(parse_result.types, type_ids):
+                        type_id_map[type_info.name] = type_id
+
+                entity_id_map = dict(type_id_map)
+                if parse_result.functions:
+                    func_ids = self.database.insert_functions(file_id, [
+                        {"name": f.name, "type_name": f.type_name,
+                         "start_line": f.start_line, "end_line": f.end_line}
+                        for f in parse_result.functions
+                    ], type_id_map)
+                    for func_info, func_id in zip(parse_result.functions, func_ids):
+                        composite_key = f"{func_info.name}@{func_info.type_name}"
+                        entity_id_map[composite_key] = func_id
+                        if func_info.name not in entity_id_map:
+                            entity_id_map[func_info.name] = func_id
+
+                # 存储calls（文件内调用关系）
+                if parse_result.calls:
+                    caller_map = {}
+                    callee_map = {}
+                    for c in parse_result.calls:
+                        caller_map[c.caller] = entity_id_map.get(c.caller)
+                        callee_map[c.callee] = entity_id_map.get(c.callee)
+                    self.database.insert_calls(
+                        [{"caller": c.caller, "callee": c.callee}
+                         for c in parse_result.calls],
+                        caller_map, callee_map
+                    )
+
+            self.database.commit()
+            return file_id, parse_result
+        except Exception:
+            self.database.rollback()
+            raise
+
+    def _store_references_only(self, file_id: int, parse_result):
+        """全量同步第二阶段：只建立引用关系"""
+        conn = self.database._get_connection()
+        entity_id_map = {}
+
+        # 构建当前文件的entity_id_map
+        for row in conn.execute(
+            "SELECT id, name FROM types WHERE file_id = ?", (file_id,)
+        ).fetchall():
+            entity_id_map[row["name"]] = row["id"]
+        for row in conn.execute(
+            "SELECT f.id, f.name, t.name as type_name FROM functions f "
+            "LEFT JOIN types t ON f.type_id = t.id WHERE f.file_id = ?", (file_id,)
+        ).fetchall():
+            # BUG-REF-01修复：LEFT JOIN返回None时用空字符串替代，与第一阶段复合key一致
+            type_name = row['type_name'] or ""
+            composite_key = f"{row['name']}@{type_name}"
+            entity_id_map[composite_key] = row["id"]
+            if row["name"] not in entity_id_map:
+                entity_id_map[row["name"]] = row["id"]
+
+        if parse_result.references:
+            self.database.insert_references(
+                [{"from_entity": r.from_entity, "to_entity": r.to_entity, "kind": r.kind}
+                 for r in parse_result.references],
+                entity_id_map,
+                current_file_id=file_id
+            )
+            try:
+                self.database.commit()
+            except Exception:
+                self.database.rollback()
+                raise
 
     def start(self):
         """启动增量更新引擎"""
@@ -309,11 +478,13 @@ class UpdateEngine:
 
     async def flush(self):
         """刷新待处理事件"""
+        # BUG-FLUSH-01修复：先获取锁取出batch，释放锁后再await
+        batch = None
         with self._lock:
             if self._pending_events:
                 batch = dict(self._pending_events)
                 self._pending_events.clear()
-                if batch:
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, self._process_batch_sync, batch
-                    )
+        if batch:
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._process_batch_sync, batch
+            )

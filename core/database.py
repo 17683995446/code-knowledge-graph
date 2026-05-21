@@ -95,7 +95,7 @@ class KnowledgeDatabase:
         """获取当前线程的数据库连接（线程安全）"""
         conn = getattr(self._local, 'connection', None)
         if conn is None:
-            conn = sqlite3.connect(self.database_path)
+            conn = sqlite3.connect(self.database_path, timeout=30.0)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=-64000")
@@ -119,7 +119,10 @@ class KnowledgeDatabase:
 
     def upsert_file(self, file_path: str, language: str, file_hash: bytes) -> int:
         """插入或更新文件记录，返回文件ID（不commit，由调用者控制事务）"""
-        modified_time = int(os.path.getmtime(file_path))
+        try:
+            modified_time = int(os.path.getmtime(file_path))
+        except (OSError, FileNotFoundError):
+            modified_time = 0
         conn = self._get_connection()
         # 先尝试查询已有记录
         existing = conn.execute(
@@ -195,7 +198,15 @@ class KnowledgeDatabase:
                     type_info.get("start_line"), type_info.get("end_line")
                 )
             )
-            inserted_ids.append(cursor.lastrowid)
+            if cursor.lastrowid:
+                inserted_ids.append(cursor.lastrowid)
+            else:
+                # INSERT OR IGNORE被忽略，查询已存在记录的ID
+                existing = conn.execute(
+                    "SELECT id FROM types WHERE name=? AND file_id=?",
+                    (type_info["name"], file_id)
+                ).fetchone()
+                inserted_ids.append(existing["id"] if existing else 0)
         return inserted_ids
 
     def insert_functions(self, file_id: int, functions_data: List[Dict[str, Any]],
@@ -506,6 +517,12 @@ class KnowledgeDatabase:
             FROM code_references r
             JOIN types t1 ON r.from_id = t1.id JOIN files f1 ON t1.file_id = f1.id
             JOIN types t2 ON r.to_id = t2.id JOIN files f2 ON t2.file_id = f2.id
+            WHERE f1.path != f2.path
+            UNION ALL
+            SELECT f1.path as from_file, f2.path as to_file, r.kind
+            FROM code_references r
+            JOIN functions fn1 ON r.from_id = fn1.id JOIN files f1 ON fn1.file_id = f1.id
+            JOIN functions fn2 ON r.to_id = fn2.id JOIN files f2 ON fn2.file_id = f2.id
             WHERE f1.path != f2.path
         """).fetchall()
 

@@ -19,9 +19,14 @@ class SiliconFlowClient:
 
     API_BASE_URL = "https://api.siliconflow.cn/v1/chat/completions"
 
-    def __init__(self, api_key: str, model: str = "deepseek-ai/DeepSeek-V2.5"):
+    # BUG-LLM-02修复：可配置的默认超时时间
+    DEFAULT_TIMEOUT = 30.0
+
+    def __init__(self, api_key: str, model: str = "deepseek-ai/DeepSeek-V2.5",
+                 timeout: Optional[float] = None):
         self.api_key = api_key
         self.model = model
+        self.timeout = timeout or self.DEFAULT_TIMEOUT
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -44,7 +49,10 @@ class SiliconFlowClient:
         return await self._chat(prompt)
 
     async def _chat(self, prompt: str, max_tokens: int = 2000) -> Optional[str]:
-        """发送聊天请求到硅基流动API"""
+        """发送聊天请求到硅基流动API
+        BUG-LLM-02修复：使用可配置的超时时间
+        BUG-LLM-03修复：更完整的响应解析和错误处理
+        """
         payload = {
             "model": self.model,
             "messages": [
@@ -61,7 +69,8 @@ class SiliconFlowClient:
             "temperature": 0.3
         }
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            # BUG-LLM-02修复：使用实例配置的超时时间
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
                     self.API_BASE_URL,
                     headers=self.headers,
@@ -69,18 +78,56 @@ class SiliconFlowClient:
                 )
                 if response.status_code == 200:
                     data = response.json()
-                    # BUG-LLM-01 修复：防御性检查API响应格式
-                    choices = data.get("choices", [])
-                    if choices and isinstance(choices, list):
-                        content = choices[0].get("message", {}).get("content", "")
-                        return content if content else None
-                    return None
+                    # BUG-LLM-03修复：更完整的响应解析
+                    return self._parse_response(data)
                 else:
                     logger.error(f"硅基流动API错误: {response.status_code} - {response.text}")
                     return None
+        except httpx.TimeoutException:
+            logger.error(f"硅基流动API请求超时(>{self.timeout}秒)")
+            return None
+        except httpx.ConnectError as e:
+            logger.error(f"硅基流动API连接错误: {e}")
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"硅基流动API响应JSON解析错误: {e}")
+            return None
         except Exception as exception:
             logger.error(f"硅基流动API请求失败: {exception}")
             return None
+
+    def _parse_response(self, data: Dict[str, Any]) -> Optional[str]:
+        """解析API响应
+        BUG-LLM-03修复：提取为独立方法，增加完整的响应解析
+        """
+        if not isinstance(data, dict):
+            logger.warning(f"API响应不是字典类型: {type(data)}")
+            return None
+
+        # BUG-LLM-01修复：防御性检查API响应格式
+        choices = data.get("choices", [])
+        if not choices or not isinstance(choices, list) or len(choices) == 0:
+            logger.warning("API响应中没有choices或格式不正确")
+            return None
+
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            logger.warning(f"第一个choice不是字典类型: {type(first_choice)}")
+            return None
+
+        message = first_choice.get("message", {})
+        if not isinstance(message, dict):
+            logger.warning(f"message不是字典类型: {type(message)}")
+            return None
+
+        content = message.get("content", "")
+        if not content or not isinstance(content, str):
+            logger.warning("API响应内容为空或格式不正确")
+            return None
+
+        # 清理内容
+        content = content.strip()
+        return content if content else None
 
     def _build_structure_prompt(self, stats: Dict[str, Any],
                                 graph_summary: Dict[str, Any]) -> str:
@@ -119,7 +166,7 @@ class SiliconFlowClient:
 依赖关系数: {len(edges)}
 关系类型分布: {json.dumps(edge_summary, ensure_ascii=False)}
 
-主要文件: {[n['label'] for n in nodes[:20]]}
+主要文件: {[n.get('label', 'unknown') for n in nodes[:20]]}
 
 请分析：
 1. 依赖关系是否合理

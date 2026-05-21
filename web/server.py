@@ -64,9 +64,15 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
     async def startup_event():
         logger.info(f"正在全量同步项目: {project_path}")
         # BUG-API-02修复：在线程池中执行全量同步，避免阻塞事件循环
-        loop = asyncio.get_event_loop()
-        sync_result = await loop.run_in_executor(None, update_engine.full_sync)
-        logger.info(f"全量同步完成: {sync_result}")
+        # BUG-SVR-02修复：添加异常处理，确保全量同步失败不导致启动崩溃
+        try:
+            loop = asyncio.get_event_loop()
+            sync_result = await loop.run_in_executor(None, update_engine.full_sync)
+            logger.info(f"全量同步完成: {sync_result}")
+        except Exception as e:
+            logger.error(f"全量同步失败: {e}")
+            # 即使同步失败也继续启动，允许服务以空数据库运行
+            sync_result = {"total": 0, "updated": 0, "error": str(e)}
         update_engine.start()
         asyncio.create_task(update_engine.start_async_loop())
         logger.info(f"文件监控已启动")
@@ -87,7 +93,8 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
 
     @app.get("/api/statistics")
     async def get_statistics():
-        stats = database.get_statistics()
+        # BUG-CROSS-001修复：使用run_in_executor避免阻塞事件循环
+        stats = await asyncio.get_running_loop().run_in_executor(None, database.get_statistics)
         stats["project_path"] = project_path
         stats["supported_languages"] = parser_registry.get_supported_languages()
         stats["engine_stats"] = update_engine.stats
@@ -95,27 +102,35 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
 
     @app.get("/api/graph")
     async def get_graph_data():
-        return database.get_graph_data()
+        # BUG-CROSS-001修复：使用run_in_executor避免阻塞事件循环
+        return await asyncio.get_running_loop().run_in_executor(None, database.get_graph_data)
 
     @app.get("/api/dependency-graph")
     async def get_dependency_graph():
-        return database.get_dependency_graph()
+        # BUG-CROSS-001修复：使用run_in_executor避免阻塞事件循环
+        return await asyncio.get_running_loop().run_in_executor(None, database.get_dependency_graph)
 
     @app.get("/api/files")
     async def get_files():
-        files = database.get_all_files()
+        # BUG-CROSS-001修复：使用run_in_executor避免阻塞事件循环
+        files = await asyncio.get_running_loop().run_in_executor(None, database.get_all_files)
         return [
             {
                 "id": f.file_id,
                 "path": f.file_path,
                 "language": f.language,
-                "modified": datetime.fromtimestamp(f.modified_time).isoformat()
+                "modified": datetime.fromtimestamp(f.modified_time).isoformat() if f.modified_time > 0 else None
             }
             for f in files
         ]
 
     @app.get("/api/file/{file_path:path}")
     async def get_file_details(file_path: str):
+        # BUG-SVR-012修复：使用realpath检查路径是否在project_path内，防止路径遍历攻击
+        import os
+        resolved_path = os.path.realpath(os.path.join(project_path, file_path))
+        if not resolved_path.startswith(os.path.realpath(project_path) + os.sep) and resolved_path != os.path.realpath(project_path):
+            raise HTTPException(status_code=400, detail="非法路径")
         details = database.get_file_details(file_path)
         if not details:
             raise HTTPException(status_code=404, detail="文件未找到")
@@ -145,10 +160,20 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
             return JSONResponse(status_code=503, content={"error": "LLM未配置"})
         stats = database.get_statistics()
         graph_data = database.get_graph_data()
-        analysis = await llm_client.analyze_code_structure(
-            stats,
-            {"nodes": len(graph_data["nodes"]), "edges": len(graph_data["edges"])}
-        )
+        # BUG-SVR-03修复：添加60秒超时，防止LLM调用挂起
+        try:
+            analysis = await asyncio.wait_for(
+                llm_client.analyze_code_structure(
+                    stats,
+                    {"nodes": len(graph_data["nodes"]), "edges": len(graph_data["edges"])}
+                ),
+                timeout=60.0
+            )
+        except asyncio.TimeoutError:
+            return JSONResponse(status_code=504, content={"error": "LLM分析超时，请稍后重试"})
+        except Exception as e:
+            logger.error(f"LLM分析异常: {e}")
+            return JSONResponse(status_code=502, content={"error": "LLM分析失败，请稍后重试"})
         if not analysis:
             return JSONResponse(status_code=502, content={"error": "LLM分析失败，请检查API密钥"})
         return {"analysis": analysis}
@@ -158,7 +183,17 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
         if not llm_client:
             return JSONResponse(status_code=503, content={"error": "LLM未配置"})
         dep_graph = database.get_dependency_graph()
-        analysis = await llm_client.analyze_file_relationships(dep_graph)
+        # BUG-SVR-03修复：添加60秒超时
+        try:
+            analysis = await asyncio.wait_for(
+                llm_client.analyze_file_relationships(dep_graph),
+                timeout=60.0
+            )
+        except asyncio.TimeoutError:
+            return JSONResponse(status_code=504, content={"error": "LLM分析超时，请稍后重试"})
+        except Exception as e:
+            logger.error(f"LLM分析异常: {e}")
+            return JSONResponse(status_code=502, content={"error": "LLM分析失败，请稍后重试"})
         if not analysis:
             return JSONResponse(status_code=502, content={"error": "LLM分析失败，请检查API密钥"})
         return {"analysis": analysis}
@@ -172,6 +207,9 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
                 if data == "ping":
                     await websocket.send_json({"type": "pong"})
         except WebSocketDisconnect:
+            websocket_manager.disconnect(websocket)
+        except Exception as e:
+            logger.error(f"WebSocket异常: {e}")
             websocket_manager.disconnect(websocket)
 
     return app

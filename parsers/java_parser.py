@@ -27,11 +27,33 @@ class JavaParser(BaseParser):
         return [".java"]
 
     def parse_file(self, file_path: str) -> ParseResult:
-        """解析Java文件"""
+        """解析Java文件
+        BUG-JAVA-02修复：尝试多种编码，添加异常日志
+        """
         result = ParseResult()
+        source_code = None
+
+        # BUG-JAVA-02修复：尝试多种编码
+        encodings = ["utf-8", "gbk", "gb2312", "latin-1", "cp1252"]
+        for encoding in encodings:
+            try:
+                with open(file_path, "r", encoding=encoding) as fh:
+                    source_code = fh.read()
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                continue
+
+        # 如果所有编码都失败，使用errors='ignore'作为最后手段
+        if source_code is None:
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
+                    source_code = fh.read()
+            except Exception as e:
+                return result
+
         try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
-                source_code = fh.read()
             if not source_code.strip():
                 return result
 
@@ -40,8 +62,10 @@ class JavaParser(BaseParser):
             self._extract_types(lines, result)
             self._extract_methods(lines, result)
             self._extract_calls(source_code, result)
-        except Exception:
-            pass
+        except Exception as e:
+            # BUG-JAVA-02修复：添加异常日志
+            import logging
+            logging.getLogger(__name__).warning(f"Java解析失败 {file_path}: {e}")
         return result
 
     def _extract_imports(self, lines: List[str], result: ParseResult):
@@ -62,7 +86,9 @@ class JavaParser(BaseParser):
                     ))
 
     def _extract_types(self, lines: List[str], result: ParseResult):
-        """提取类型定义（class/interface/enum）"""
+        """提取类型定义（class/interface/enum）
+        BUG-STR-LIT-01修复：跳过字符串和注释中的内容
+        """
         type_pattern = re.compile(
             r'(?:public|private|protected)?\s*(?:abstract|final|static)?\s*'
             r'(class|interface|enum)\s+(\w+)'
@@ -70,15 +96,27 @@ class JavaParser(BaseParser):
             r'(?:\s+implements\s+([\w,\s]+))?'
         )
         for line_num, line in enumerate(lines, 1):
+            stripped = line.strip()
+            # 跳过注释和字符串行
+            if stripped.startswith('//') or stripped.startswith('*') or stripped.startswith('/*'):
+                continue
+            # 跳过字符串字面量行（简单启发式）
+            if stripped.startswith('"') or stripped.startswith("'"):
+                continue
+
             match = type_pattern.search(line)
             if match:
+                # BUG-STR-LIT-01: 检查匹配是否在字符串字面量内
+                if self._is_inside_string(line, match.start()):
+                    continue
                 kind = match.group(1)
                 type_name = match.group(2)
+                type_end = self.compute_end_line(lines, line_num)
                 result.types.append(TypeInfo(
                     name=type_name,
                     kind=kind,
                     start_line=line_num,
-                    end_line=line_num
+                    end_line=type_end
                 ))
                 if match.group(3):
                     result.references.append(ReferenceInfo(
@@ -97,13 +135,22 @@ class JavaParser(BaseParser):
                             ))
 
     def _extract_methods(self, lines: List[str], result: ParseResult):
-        """提取方法定义"""
+        """提取方法定义
+        BUG-FUNC-DUP-02修复：使用compute_end_line正确计算范围
+        BUG-STR-LIT-01修复：跳过字符串和注释，检查匹配是否在引号内
+        BUG-JAVA-03修复：放宽方法匹配正则，支持方法体在下一行
+        """
+        # BUG-JAVA-03修复：放宽正则，不要求行尾有{
         method_pattern = re.compile(
-            r'(?:public|private|protected)?\s*(?:static|final|abstract|synchronized|native)?\s*'
-            r'(?:[\w<>\[\],\s]+)\s+(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*\{?'
+            r'^\s*(?:public|private|protected)?\s*(?:static|final|abstract|synchronized|native)?\s*'
+            r'(?:[\w<>\[\],\s]+)\s+(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*(?:\{?|$)'
         )
         current_class = ""
         for line_num, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('//') or stripped.startswith('*') or stripped.startswith('/*'):
+                continue
+
             class_match = re.search(r'(?:class|interface|enum)\s+(\w+)', line)
             if class_match:
                 current_class = class_match.group(1)
@@ -115,15 +162,42 @@ class JavaParser(BaseParser):
                     "if", "for", "while", "switch", "catch", "return",
                     "new", "class", "interface", "enum", "import", "package",
                     "public", "private", "protected", "static", "final",
-                    "abstract", "synchronized", "void"
+                    "abstract", "synchronized", "void", "extends", "implements"
                 }
-                if method_name not in skip_words and not method_name[0].isupper():
-                    result.functions.append(FunctionInfo(
-                        name=method_name,
-                        type_name=current_class or "__module__",
-                        start_line=line_num,
-                        end_line=line_num
-                    ))
+                # BUG-JAVA-03修复：更严格的过滤条件
+                if method_name in skip_words:
+                    continue
+                if method_name[0].isupper():
+                    continue
+                # 排除纯数字
+                if method_name.isdigit():
+                    continue
+                # BUG-STR-LIT-01: 检查匹配位置是否在字符串字面量内
+                match_pos = method_match.start()
+                if self._is_inside_string(line, match_pos):
+                    continue
+                method_end = self.compute_end_line(lines, line_num)
+                result.functions.append(FunctionInfo(
+                    name=method_name,
+                    type_name=current_class or "__module__",
+                    start_line=line_num,
+                    end_line=method_end
+                ))
+
+    @staticmethod
+    def _is_inside_string(line: str, pos: int) -> bool:
+        """检查给定位置是否在字符串字面量内"""
+        in_string = False
+        i = 0
+        while i < pos:
+            ch = line[i]
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == '"':
+                in_string = not in_string
+            i += 1
+        return in_string
 
     def _extract_calls(self, source_code: str, result: ParseResult):
         """提取方法调用关系
@@ -144,7 +218,10 @@ class JavaParser(BaseParser):
         for func_info in result.functions:
             caller = func_info.name
             start = func_info.start_line or 0
-            end = func_info.end_line or start + 50
+            # BUG-SYS-004修复：当end_line等于start_line时，使用默认范围
+            end = func_info.end_line
+            if end <= start:
+                end = start + 100
             search_text = '\n'.join(lines[max(0, start - 1):min(len(lines), end)])
             matches = call_pattern.findall(search_text)
             for callee in matches:

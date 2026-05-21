@@ -5,6 +5,7 @@ File Watcher - 跨平台文件监控
 """
 
 import os
+import logging
 from pathlib import Path
 from typing import Callable, Set, Optional
 from watchdog.observers import Observer
@@ -12,6 +13,9 @@ from watchdog.events import (
     FileSystemEventHandler, FileSystemEvent,
     FileSystemMovedEvent
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class CodeFileHandler(FileSystemEventHandler):
@@ -66,16 +70,25 @@ class CodeFileHandler(FileSystemEventHandler):
             self.callback(path, event_type)
 
     def on_created(self, event: FileSystemEvent):
-        if not event.is_directory:
-            self._dispatch_event(event.src_path, "created")
+        try:
+            if not event.is_directory:
+                self._dispatch_event(event.src_path, "created")
+        except Exception as e:
+            logger.error(f"on_created事件处理异常: {e}")
 
     def on_deleted(self, event: FileSystemEvent):
-        if not event.is_directory:
-            self._dispatch_event(event.src_path, "deleted")
+        try:
+            if not event.is_directory:
+                self._dispatch_event(event.src_path, "deleted")
+        except Exception as e:
+            logger.error(f"on_deleted事件处理异常: {e}")
 
     def on_modified(self, event: FileSystemEvent):
-        if not event.is_directory:
-            self._dispatch_event(event.src_path, "modified")
+        try:
+            if not event.is_directory:
+                self._dispatch_event(event.src_path, "modified")
+        except Exception as e:
+            logger.error(f"on_modified事件处理异常: {e}")
 
     def on_moved(self, event: FileSystemMovedEvent):
         """
