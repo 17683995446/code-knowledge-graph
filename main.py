@@ -9,8 +9,10 @@ Code Knowledge Graph System - 主启动入口
 
 import os
 import sys
+import signal
 import click
 import logging
+import asyncio
 from pathlib import Path
 
 # 将项目根目录加入Python路径
@@ -20,6 +22,11 @@ if project_root not in sys.path:
 
 from web.server import create_app
 import uvicorn
+
+
+# BUG-MAIN-01修复: 全局变量用于优雅关闭
+_shutdown_event = None
+_update_engine = None
 
 
 def setup_logging(verbose: bool = False):
@@ -32,6 +39,37 @@ def setup_logging(verbose: bool = False):
     )
     logging.getLogger("watchdog").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
+
+def signal_handler(signum, frame):
+    """BUG-MAIN-01修复: 信号处理器，支持优雅关闭"""
+    logger = logging.getLogger("main")
+    logger.info(f"收到信号 {signum}，正在优雅关闭...")
+    
+    # 停止更新引擎
+    global _update_engine
+    if _update_engine:
+        try:
+            _update_engine.stop()
+            logger.info("更新引擎已停止")
+        except Exception as e:
+            logger.error(f"停止更新引擎失败: {e}")
+    
+    # 设置关闭事件
+    global _shutdown_event
+    if _shutdown_event:
+        _shutdown_event.set()
+    
+    # 强制退出（作为最后手段）
+    import threading
+    def force_exit():
+        import time
+        time.sleep(5)  # 等待5秒让优雅关闭完成
+        logger.warning("优雅关闭超时，强制退出")
+        os._exit(0)
+    
+    exit_thread = threading.Thread(target=force_exit, daemon=True)
+    exit_thread.start()
 
 
 @click.command()
@@ -49,6 +87,14 @@ def main(project_path: str, port: int, host: str, db: str, api_key: str, verbose
     """
     setup_logging(verbose)
     logger = logging.getLogger("main")
+
+    # BUG-MAIN-01修复: 注册信号处理器
+    global _shutdown_event
+    _shutdown_event = asyncio.Event()
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    logger.info("已注册信号处理器 (SIGINT, SIGTERM)")
 
     project_path = os.path.abspath(project_path)
     if not os.path.isdir(project_path):
@@ -73,14 +119,34 @@ def main(project_path: str, port: int, host: str, db: str, api_key: str, verbose
         siliconflow_api_key=api_key
     )
 
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level="info" if not verbose else "debug",
-        ws_ping_interval=30,
-        ws_ping_timeout=10
-    )
+    # BUG-MAIN-01修复: 获取update_engine引用用于优雅关闭
+    global _update_engine
+    # 尝试从app.state获取update_engine
+    try:
+        from web.server import get_update_engine
+        _update_engine = get_update_engine()
+    except Exception:
+        pass  # 如果获取失败，优雅关闭时跳过
+
+    try:
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level="info" if not verbose else "debug",
+            ws_ping_interval=30,
+            ws_ping_timeout=10
+        )
+    except KeyboardInterrupt:
+        logger.info("收到键盘中断，正在关闭...")
+    finally:
+        # BUG-MAIN-01修复: 确保清理资源
+        if _update_engine:
+            try:
+                _update_engine.stop()
+            except Exception:
+                pass
+        logger.info("系统已关闭")
 
 
 if __name__ == "__main__":

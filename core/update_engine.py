@@ -43,10 +43,13 @@ class UpdateEngine:
         self.debounce_window = debounce_window
 
         # 线程安全的事件队列
-        self._event_queue: Queue = Queue()
+        self._event_queue: Queue = Queue(maxsize=10000)  # BUG-UPDATE-005修复: 限制最大10000个事件
         self._pending_events: Dict[str, Set[str]] = {}
         self._lock = threading.Lock()
-        self._running = False
+        self._stats_lock = threading.Lock()  # BUG-UE-001修复: stats字典的并发访问保护
+        # BUG-UPDATE-010/011修复: 使用threading.Event替代bool标志，确保原子操作
+        self._running_event = threading.Event()
+        self._running_event.set()  # 初始状态为运行
         self._loop = None  # 保存asyncio事件循环引用
 
         self.file_watcher = FileWatcher(
@@ -68,7 +71,7 @@ class UpdateEngine:
     async def _process_events_loop(self):
         """异步事件处理循环"""
         self._loop = asyncio.get_running_loop()  # 保存事件循环引用
-        while self._running:
+        while self._running_event.is_set():  # BUG-UPDATE-010/011修复: 使用Event检查
             try:
                 # BUG-LOOP-01修复：使用try/except捕获queue.Empty，避免多线程下empty()不可靠
                 while True:
@@ -102,7 +105,10 @@ class UpdateEngine:
                 await asyncio.sleep(0.5)
 
     def _process_batch_sync(self, batch: Dict[str, Set[str]]):
-        """同步处理一批文件变更（在线程池中执行）"""
+        """同步处理一批文件变更（在线程池中执行）
+        BUG-UPDATE-007修复: 每个文件处理独立隔离，一个失败不影响其他文件
+        BUG-UE-001修复: 使用锁保护stats的读写操作
+        """
         updated_files = []
         errors = []
 
@@ -111,27 +117,35 @@ class UpdateEngine:
                 event_type = self._resolve_event_type(event_types)
                 self._update_single_file(file_path, event_type)
                 updated_files.append(file_path)
-                self.stats["total_files_processed"] += 1
+                with self._stats_lock:  # BUG-UE-001修复: 加锁保护stats
+                    self.stats["total_files_processed"] += 1
             except Exception as exception:
                 error_msg = f"{file_path}: {str(exception)}"
                 errors.append(error_msg)
                 logger.error(f"更新文件失败: {error_msg}")
+                # BUG-UPDATE-007修复: 继续处理其他文件，不中断整个批处理
 
-        self.stats["total_updates"] += 1
-        self.stats["last_update_time"] = datetime.now().isoformat()
-        self.stats["errors"] = errors[-100:]
+        with self._stats_lock:  # BUG-UE-001修复: 加锁保护stats
+            self.stats["total_updates"] += 1
+            self.stats["last_update_time"] = datetime.now().isoformat()
+            self.stats["errors"] = errors[-100:]
 
         # 通知回调（需要在async上下文中调用）
+        # BUG-UPDATE-015修复: 回调异常隔离
         if self.on_update_callback and updated_files:
-            loop = self._loop
-            if loop and loop.is_running():
-                # 使用默认参数绑定当前值，避免闭包问题
-                callback = self.on_update_callback
-                files_copy = list(updated_files)
-                errors_copy = list(errors)
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.ensure_future(callback(files_copy, errors_copy))
-                )
+            try:
+                loop = self._loop
+                if loop and loop.is_running():
+                    # 使用默认参数绑定当前值，避免闭包问题
+                    callback = self.on_update_callback
+                    files_copy = list(updated_files)
+                    errors_copy = list(errors)
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.ensure_future(callback(files_copy, errors_copy))
+                    )
+            except Exception as callback_error:
+                # BUG-UPDATE-015修复: 捕获回调异常，不影响主流程
+                logger.error(f"回调执行失败: {callback_error}")
 
     def _resolve_event_type(self, event_types: Set[str]) -> str:
         """解析合并后的事件类型"""
@@ -146,6 +160,7 @@ class UpdateEngine:
         核心方法：更新单个文件（事务原子性保护）
         策略：先解析新数据，成功后再删除旧数据并插入新数据
         如果解析失败，旧数据保持不变
+        BUG-UE-007修复：实现"先解析后替换"策略，解析失败时保留旧数据
         """
         file_path = os.path.abspath(file_path)
 
@@ -169,17 +184,36 @@ class UpdateEngine:
             if not language:
                 return
 
-            # 先解析文件内容（可能失败）
+            # BUG-UE-007修复：先解析文件内容，解析成功后再删除旧数据
             parser = self.parser_registry.get_parser(language)
             parse_result = None
+            parse_success = False
             if parser:
                 try:
                     parse_result = parser.parse_file(file_path)
+                    parse_success = True
                 except Exception as e:
-                    logger.warning(f"解析文件失败 {file_path}: {e}")
+                    logger.warning(f"解析文件失败 {file_path}: {e}，保留旧数据")
                     parse_result = None
+                    parse_success = False
 
             file_hash = self.database.compute_file_hash(file_path)
+
+            # BUG-UE-007修复：只有解析成功才执行更新，否则保留旧数据
+            if not parse_success:
+                # 解析失败，检查是否是新文件（无旧数据）
+                file_record = self.database.get_file_by_path(file_path)
+                if file_record is None:
+                    # 新文件但解析失败，只插入文件记录，不存储解析结果
+                    try:
+                        file_id = self.database.upsert_file(file_path, language, file_hash)
+                        self.database.commit()
+                        logger.info(f"新文件解析失败，仅记录文件信息: {file_path}")
+                    except Exception as e:
+                        logger.error(f"插入文件记录失败 {file_path}: {e}")
+                        self.database.rollback()
+                # 有旧数据则保留不变
+                return
 
             # 解析成功后，执行原子更新（事务内完成）
             try:
@@ -258,9 +292,12 @@ class UpdateEngine:
             # 原commit()会破坏外层事务的rollback能力
 
     def full_sync(self):
-        """执行首次全量同步
+        """
+        执行首次全量同步
         BUG-FULL-SYNC-01修复：两阶段同步，确保跨文件引用能正确解析
         BUG-UE-004修复：使用临时表备份策略，防止崩溃后数据全部丢失
+        BUG-UE-003修复：备份失败时中止同步
+        BUG-UE-004修复：清空失败时抛出异常
         第一阶段：提取所有文件的实体（types/functions/calls）
         第二阶段：建立跨文件引用关系（references）
         """
@@ -268,6 +305,7 @@ class UpdateEngine:
 
         # BUG-UE-004修复：先将旧数据备份到临时表，成功后再删除
         conn = self.database._get_connection()
+        backup_success = False
         try:
             # 创建备份临时表
             conn.execute("CREATE TABLE IF NOT EXISTS _backup_files AS SELECT * FROM files WHERE 0")
@@ -286,9 +324,13 @@ class UpdateEngine:
             conn.execute("DELETE FROM _backup_code_references")
             conn.execute("INSERT INTO _backup_code_references SELECT * FROM code_references")
             conn.commit()
+            backup_success = True
             logger.debug("旧数据已备份到临时表")
         except Exception as e:
-            logger.warning(f"备份数据失败（可能首次运行）: {e}")
+            conn.rollback()
+            # BUG-UE-003修复：备份失败时中止同步
+            logger.error(f"备份数据失败，中止同步: {e}")
+            raise RuntimeError(f"全量同步备份数据失败: {e}")
 
         # 清空现有数据
         try:
@@ -300,15 +342,27 @@ class UpdateEngine:
             conn.commit()
         except Exception as e:
             conn.rollback()
+            # BUG-UE-004修复：清空失败时抛出异常
             logger.error(f"全量同步清空数据失败: {e}")
-            return {"total": 0, "updated": 0}
+            raise RuntimeError(f"全量同步清空数据失败: {e}")
 
         extensions_map = FileWatcher.get_language_extensions()
         extensions = set(extensions_map.keys())
 
         # 收集所有文件
+        # BUG-UPDATE-002修复：设置followlinks=False并添加符号链接循环检测
         all_files = []
-        for root_dir, dir_names, file_names in os.walk(self.project_path):
+        visited_real_paths = set()  # 用于检测符号链接循环
+        
+        for root_dir, dir_names, file_names in os.walk(self.project_path, followlinks=False):
+            # BUG-UPDATE-002修复：检测符号链接循环
+            real_root = os.path.realpath(root_dir)
+            if real_root in visited_real_paths:
+                logger.warning(f"检测到符号链接循环，跳过目录: {root_dir} -> {real_root}")
+                dir_names[:] = []  # 不再遍历子目录
+                continue
+            visited_real_paths.add(real_root)
+            
             dir_names[:] = [
                 d for d in dir_names
                 if d not in {"__pycache__", "node_modules", ".git", "venv",
@@ -461,18 +515,18 @@ class UpdateEngine:
 
     def start(self):
         """启动增量更新引擎"""
-        self._running = True
+        self._running_event.set()  # BUG-UPDATE-010/011修复: 使用Event.set()
         self.file_watcher.start()
         logger.info(f"文件监控已启动: {self.project_path}")
 
     def start_async_loop(self):
         """启动异步事件处理循环"""
-        self._running = True
+        self._running_event.set()  # BUG-UPDATE-010/011修复: 使用Event.set()
         return self._process_events_loop()
 
     def stop(self):
         """停止增量更新引擎"""
-        self._running = False
+        self._running_event.clear()  # BUG-UPDATE-010/011修复: 使用Event.clear()
         self.file_watcher.stop()
         logger.info("文件监控已停止")
 

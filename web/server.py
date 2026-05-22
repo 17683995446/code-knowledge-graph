@@ -6,6 +6,7 @@ Web Server - FastAPI Web服务
 import os
 import asyncio
 import logging
+import threading
 from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -20,6 +21,11 @@ from web.websocket_manager import WebSocketManager
 from llm.siliconflow_client import SiliconFlowClient
 
 logger = logging.getLogger(__name__)
+
+# BUG-MAIN-01修复: 全局变量用于优雅关闭
+_global_update_engine = None
+# BUG-SVR-08修复: 全量同步锁，防止并发全量同步
+_sync_lock = threading.Lock()
 
 
 def create_app(project_path: str, database_path: str = "code_knowledge.db",
@@ -59,6 +65,10 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
     app.state.websocket_manager = websocket_manager
     app.state.llm_client = llm_client
     app.state.project_path = project_path
+
+    # BUG-MAIN-01修复: 设置全局update_engine引用
+    global _global_update_engine
+    _global_update_engine = update_engine
 
     @app.on_event("startup")
     async def startup_event():
@@ -145,14 +155,27 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
 
     @app.post("/api/sync")
     async def trigger_sync():
-        # BUG-API-01修复：在线程池中执行全量同步
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, update_engine.full_sync)
-        await websocket_manager.broadcast({
-            "type": "full_sync",
-            "data": {"timestamp": datetime.now().isoformat(), **result}
-        })
-        return result
+        """
+        触发全量同步
+        BUG-SVR-08修复：添加同步锁防止并发全量同步
+        """
+        # 检查是否已有同步在进行
+        if not _sync_lock.acquire(blocking=False):
+            return JSONResponse(
+                status_code=429,
+                content={"error": "已有全量同步正在进行中，请稍后重试"}
+            )
+        try:
+            # BUG-API-01修复：在线程池中执行全量同步
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, update_engine.full_sync)
+            await websocket_manager.broadcast({
+                "type": "full_sync",
+                "data": {"timestamp": datetime.now().isoformat(), **result}
+            })
+            return result
+        finally:
+            _sync_lock.release()
 
     @app.get("/api/analysis/structure")
     async def analyze_structure():
@@ -224,3 +247,8 @@ def _make_update_callback(websocket_manager: WebSocketManager,
         stats = database.get_statistics()
         await websocket_manager.send_stats_update(stats)
     return on_update
+
+
+def get_update_engine():
+    """BUG-MAIN-01修复: 获取全局update_engine引用"""
+    return _global_update_engine

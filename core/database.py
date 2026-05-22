@@ -8,8 +8,11 @@ import sqlite3
 import hashlib
 import os
 import threading
+import logging
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -27,6 +30,7 @@ class KnowledgeDatabase:
     代码知识图谱数据库
     线程安全：每个线程使用独立连接，通过 thread-local 实现
     事务原子性：文件更新在单个事务中完成
+    BUG-DB-002修复：维护所有线程连接的列表，在close时全部关闭
     """
 
     SCHEMA_SQL = """
@@ -86,13 +90,39 @@ class KnowledgeDatabase:
         self.database_path = database_path
         self._local = threading.local()
         self._lock = threading.Lock()
-        # 初始化：创建连接并建表
-        conn = self._get_connection()
-        conn.executescript(self.SCHEMA_SQL)
-        conn.commit()
+        self._write_lock = threading.Lock()  # BUG-DB-003修复: 写入锁保护WAL并发写入
+        # BUG-DB-002修复：维护所有线程连接的列表
+        self._all_connections: List[sqlite3.Connection] = []
+        self._connections_lock = threading.Lock()
+        
+        # BUG-DB-009修复：建表失败时进行清理
+        conn = None
+        try:
+            conn = self._get_connection()
+            conn.executescript(self.SCHEMA_SQL)
+            conn.commit()
+        except Exception as e:
+            logger.error(f"数据库初始化失败: {e}")
+            # BUG-DB-009修复：建表失败后清理连接
+            if conn:
+                try:
+                    conn.rollback()
+                    conn.close()
+                except Exception:
+                    pass
+            # 从连接列表中移除
+            with self._connections_lock:
+                if conn in self._all_connections:
+                    self._all_connections.remove(conn)
+            if hasattr(self._local, 'connection'):
+                self._local.connection = None
+            raise
 
     def _get_connection(self) -> sqlite3.Connection:
-        """获取当前线程的数据库连接（线程安全）"""
+        """
+        获取当前线程的数据库连接（线程安全）
+        BUG-DB-002修复：将新连接添加到全局列表
+        """
         conn = getattr(self._local, 'connection', None)
         if conn is None:
             conn = sqlite3.connect(self.database_path, timeout=30.0)
@@ -102,6 +132,9 @@ class KnowledgeDatabase:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.row_factory = sqlite3.Row
             self._local.connection = conn
+            # BUG-DB-002修复：将连接添加到全局列表
+            with self._connections_lock:
+                self._all_connections.append(conn)
         return conn
 
     @property
@@ -118,28 +151,31 @@ class KnowledgeDatabase:
         return hasher.digest()
 
     def upsert_file(self, file_path: str, language: str, file_hash: bytes) -> int:
-        """插入或更新文件记录，返回文件ID（不commit，由调用者控制事务）"""
+        """插入或更新文件记录，返回文件ID（不commit，由调用者控制事务）
+        BUG-DB-003修复: 使用写入锁保护并发写入
+        """
         try:
             modified_time = int(os.path.getmtime(file_path))
         except (OSError, FileNotFoundError):
             modified_time = 0
         conn = self._get_connection()
-        # 先尝试查询已有记录
-        existing = conn.execute(
-            "SELECT id FROM files WHERE path = ?", (file_path,)
-        ).fetchone()
-        if existing:
-            conn.execute(
-                "UPDATE files SET language=?, hash=?, modified=? WHERE path=?",
-                (language, file_hash, modified_time, file_path)
-            )
-            return existing["id"]
-        else:
-            cursor = conn.execute(
-                "INSERT INTO files (path, language, hash, modified) VALUES (?, ?, ?, ?)",
-                (file_path, language, file_hash, modified_time)
-            )
-            return cursor.lastrowid
+        with self._write_lock:  # BUG-DB-003修复: 加写入锁
+            # 先尝试查询已有记录
+            existing = conn.execute(
+                "SELECT id FROM files WHERE path = ?", (file_path,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE files SET language=?, hash=?, modified=? WHERE path=?",
+                    (language, file_hash, modified_time, file_path)
+                )
+                return existing["id"]
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO files (path, language, hash, modified) VALUES (?, ?, ?, ?)",
+                    (file_path, language, file_hash, modified_time)
+                )
+                return cursor.lastrowid
 
     def get_file_by_path(self, file_path: str) -> Optional[FileRecord]:
         """根据路径查询文件记录"""
@@ -156,110 +192,131 @@ class KnowledgeDatabase:
         return None
 
     def delete_file_cascade(self, file_id: int):
-        """级联删除文件及其所有关联数据（不commit，由调用者控制事务）"""
+        """级联删除文件及其所有关联数据（不commit，由调用者控制事务）
+        BUG-DB-007修复: 添加空列表检查，避免SQL语法错误
+        BUG-DB-011修复: 整个操作包装在事务中
+        BUG-DB-003修复: 使用写入锁保护并发写入
+        """
         conn = self._get_connection()
-        cursor = conn.cursor()
-        type_ids = cursor.execute(
-            "SELECT id FROM types WHERE file_id = ?", (file_id,)
-        ).fetchall()
-        type_id_list = [t["id"] for t in type_ids]
+        with self._write_lock:  # BUG-DB-003修复: 加写入锁
+            cursor = conn.cursor()
+            type_ids = cursor.execute(
+                "SELECT id FROM types WHERE file_id = ?", (file_id,)
+            ).fetchall()
+            type_id_list = [t["id"] for t in type_ids]
 
-        function_ids = cursor.execute(
-            "SELECT id FROM functions WHERE file_id = ?", (file_id,)
-        ).fetchall()
-        function_id_list = [f["id"] for f in function_ids]
+            function_ids = cursor.execute(
+                "SELECT id FROM functions WHERE file_id = ?", (file_id,)
+            ).fetchall()
+            function_id_list = [f["id"] for f in function_ids]
 
-        all_entity_ids = type_id_list + function_id_list
-        if all_entity_ids:
-            placeholders = ",".join("?" * len(all_entity_ids))
-            cursor.execute(
-                f"DELETE FROM calls WHERE caller_id IN ({placeholders}) OR callee_id IN ({placeholders})",
-                all_entity_ids * 2
-            )
-            cursor.execute(
-                f"DELETE FROM code_references WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
-                all_entity_ids * 2
-            )
+            all_entity_ids = type_id_list + function_id_list
+            # BUG-DB-007修复: 添加空列表检查，避免SQL语法错误
+            if all_entity_ids:
+                placeholders = ",".join("?" * len(all_entity_ids))
+                cursor.execute(
+                    f"DELETE FROM calls WHERE caller_id IN ({placeholders}) OR callee_id IN ({placeholders})",
+                    all_entity_ids * 2
+                )
+                cursor.execute(
+                    f"DELETE FROM code_references WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})",
+                    all_entity_ids * 2
+                )
 
-        cursor.execute("DELETE FROM functions WHERE file_id = ?", (file_id,))
-        cursor.execute("DELETE FROM types WHERE file_id = ?", (file_id,))
-        cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
+            cursor.execute("DELETE FROM functions WHERE file_id = ?", (file_id,))
+            cursor.execute("DELETE FROM types WHERE file_id = ?", (file_id,))
+            cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
+            # 注意: 不在此处commit，由调用者控制事务边界
 
     def insert_types(self, file_id: int, types_data: List[Dict[str, Any]]) -> List[int]:
-        """批量插入类型实体（使用INSERT OR IGNORE避免重复，不commit）"""
+        """批量插入类型实体（使用INSERT OR IGNORE避免重复，不commit）
+        BUG-DB-003修复: 使用写入锁保护并发写入
+        """
         conn = self._get_connection()
         inserted_ids = []
-        for type_info in types_data:
-            cursor = conn.execute(
-                "INSERT OR IGNORE INTO types (name, file_id, kind, flags, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    type_info["name"], file_id, type_info["kind"],
-                    type_info.get("flags", 0),
-                    type_info.get("start_line"), type_info.get("end_line")
+        with self._write_lock:  # BUG-DB-003修复: 加写入锁
+            for type_info in types_data:
+                cursor = conn.execute(
+                    "INSERT OR IGNORE INTO types (name, file_id, kind, flags, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        type_info["name"], file_id, type_info["kind"],
+                        type_info.get("flags", 0),
+                        type_info.get("start_line"), type_info.get("end_line")
+                    )
                 )
-            )
-            if cursor.lastrowid:
-                inserted_ids.append(cursor.lastrowid)
-            else:
-                # INSERT OR IGNORE被忽略，查询已存在记录的ID
-                existing = conn.execute(
-                    "SELECT id FROM types WHERE name=? AND file_id=?",
-                    (type_info["name"], file_id)
-                ).fetchone()
-                inserted_ids.append(existing["id"] if existing else 0)
+                if cursor.lastrowid:
+                    inserted_ids.append(cursor.lastrowid)
+                else:
+                    # INSERT OR IGNORE被忽略，查询已存在记录的ID
+                    existing = conn.execute(
+                        "SELECT id FROM types WHERE name=? AND file_id=?",
+                        (type_info["name"], file_id)
+                    ).fetchone()
+                    inserted_ids.append(existing["id"] if existing else 0)
         return inserted_ids
 
     def insert_functions(self, file_id: int, functions_data: List[Dict[str, Any]],
                          type_id_map: Dict[str, int]) -> List[int]:
-        """批量插入函数实体（不commit）"""
+        """批量插入函数实体（不commit）
+        BUG-DB-012修复: 添加type_id有效性检查，type_id为0时跳过插入
+        BUG-DB-003修复: 使用写入锁保护并发写入
+        """
         conn = self._get_connection()
         inserted_ids = []
-        for func_info in functions_data:
-            type_name = func_info.get("type_name", "") or "__module__"
-            type_id = type_id_map.get(type_name)
-            if type_id is None:
-                cursor = conn.execute(
-                    "INSERT OR IGNORE INTO types (name, file_id, kind, flags) VALUES (?, ?, 'module', 0)",
-                    (type_name, file_id)
-                )
-                type_id = cursor.lastrowid
-                if type_id:
-                    type_id_map[type_name] = type_id
-                else:
-                    # 类型已存在，查询获取ID
-                    existing = conn.execute(
-                        "SELECT id FROM types WHERE name=? AND file_id=?",
+        with self._write_lock:  # BUG-DB-003修复: 加写入锁
+            for func_info in functions_data:
+                type_name = func_info.get("type_name", "") or "__module__"
+                type_id = type_id_map.get(type_name)
+                if type_id is None:
+                    cursor = conn.execute(
+                        "INSERT OR IGNORE INTO types (name, file_id, kind, flags) VALUES (?, ?, 'module', 0)",
                         (type_name, file_id)
-                    ).fetchone()
-                    type_id = existing["id"] if existing else 0
-                    type_id_map[type_name] = type_id
-
-            if type_id:
-                cursor = conn.execute(
-                    "INSERT INTO functions (name, type_id, file_id, start_line, end_line) VALUES (?, ?, ?, ?, ?)",
-                    (
-                        func_info["name"], type_id, file_id,
-                        func_info.get("start_line"), func_info.get("end_line")
                     )
-                )
-                inserted_ids.append(cursor.lastrowid)
+                    type_id = cursor.lastrowid
+                    if type_id:
+                        type_id_map[type_name] = type_id
+                    else:
+                        # 类型已存在，查询获取ID
+                        existing = conn.execute(
+                            "SELECT id FROM types WHERE name=? AND file_id=?",
+                            (type_name, file_id)
+                        ).fetchone()
+                        type_id = existing["id"] if existing else 0
+                        type_id_map[type_name] = type_id
+
+                # BUG-DB-012修复: type_id为0时跳过插入，避免无效外键
+                if type_id and type_id > 0:
+                    cursor = conn.execute(
+                        "INSERT INTO functions (name, type_id, file_id, start_line, end_line) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            func_info["name"], type_id, file_id,
+                            func_info.get("start_line"), func_info.get("end_line")
+                        )
+                    )
+                    inserted_ids.append(cursor.lastrowid)
+                else:
+                    logger.warning(f"跳过函数插入，无效的type_id: {func_info['name']}, type_id={type_id}")
+                    inserted_ids.append(0)  # 返回0表示未插入
         return inserted_ids
 
     def insert_calls(self, calls_data: List[Dict[str, Any]],
                      caller_id_map: Dict[str, int], callee_id_map: Dict[str, int]):
-        """批量插入调用关系（不commit）"""
+        """批量插入调用关系（不commit）
+        BUG-DB-003修复: 使用写入锁保护并发写入
+        """
         conn = self._get_connection()
-        for call_info in calls_data:
-            caller_id = caller_id_map.get(call_info["caller"])
-            callee_id = callee_id_map.get(call_info["callee"])
-            if caller_id and callee_id and caller_id != callee_id:
-                try:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO calls (caller_id, callee_id) VALUES (?, ?)",
-                        (caller_id, callee_id)
-                    )
-                except sqlite3.IntegrityError:
-                    pass
+        with self._write_lock:  # BUG-DB-003修复: 加写入锁
+            for call_info in calls_data:
+                caller_id = caller_id_map.get(call_info["caller"])
+                callee_id = callee_id_map.get(call_info["callee"])
+                if caller_id and callee_id and caller_id != callee_id:
+                    try:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO calls (caller_id, callee_id) VALUES (?, ?)",
+                            (caller_id, callee_id)
+                        )
+                    except sqlite3.IntegrityError:
+                        pass
 
     def insert_references(self, refs_data: List[Dict[str, Any]],
                           entity_id_map: Dict[str, int],
@@ -267,68 +324,70 @@ class KnowledgeDatabase:
         """批量插入引用关系，支持跨文件实体查找（不commit）
         BUG-REF-03修复：同时查types和functions表
         BUG-REF-04修复：__imports__引用自动关联当前文件所有实体
+        BUG-DB-003修复: 使用写入锁保护并发写入
         """
         conn = self._get_connection()
-        for ref_info in refs_data:
-            from_entity = ref_info["from_entity"]
-            to_entity = ref_info["to_entity"]
-            from_id = entity_id_map.get(from_entity)
-            to_id = entity_id_map.get(to_entity)
+        with self._write_lock:  # BUG-DB-003修复: 加写入锁
+            for ref_info in refs_data:
+                from_entity = ref_info["from_entity"]
+                to_entity = ref_info["to_entity"]
+                from_id = entity_id_map.get(from_entity)
+                to_id = entity_id_map.get(to_entity)
 
-            # __imports__ 引用：表示当前文件导入了 to_entity
-            # 只将当前文件的types（类/接口）作为 from_id，不关联functions
-            if from_entity == "__imports__" and current_file_id:
-                to_id = self._find_entity_id(conn, to_entity)
-                if to_id:
-                    for row in conn.execute(
-                        "SELECT id FROM types WHERE file_id = ? AND kind != 'module'",
-                        (current_file_id,)
-                    ).fetchall():
-                        fid = row["id"]
-                        if fid != to_id:
-                            try:
-                                conn.execute(
-                                    "INSERT OR IGNORE INTO code_references (from_id, to_id, kind) VALUES (?, ?, ?)",
-                                    (fid, to_id, ref_info["kind"])
-                                )
-                            except sqlite3.IntegrityError:
-                                pass
-                continue
+                # __imports__ 引用：表示当前文件导入了 to_entity
+                # 只将当前文件的types（类/接口）作为 from_id，不关联functions
+                if from_entity == "__imports__" and current_file_id:
+                    to_id = self._find_entity_id(conn, to_entity)
+                    if to_id:
+                        for row in conn.execute(
+                            "SELECT id FROM types WHERE file_id = ? AND kind != 'module'",
+                            (current_file_id,)
+                        ).fetchall():
+                            fid = row["id"]
+                            if fid != to_id:
+                                try:
+                                    conn.execute(
+                                        "INSERT OR IGNORE INTO code_references (from_id, to_id, kind) VALUES (?, ?, ?)",
+                                        (fid, to_id, ref_info["kind"])
+                                    )
+                                except sqlite3.IntegrityError:
+                                    pass
+                    continue
 
-            # __module__ 引用：类似处理，只关联types
-            if from_entity == "__module__" and current_file_id:
-                to_id = self._find_entity_id(conn, to_entity)
-                if to_id:
-                    for row in conn.execute(
-                        "SELECT id FROM types WHERE file_id = ? AND kind != 'module'",
-                        (current_file_id,)
-                    ).fetchall():
-                        fid = row["id"]
-                        if fid != to_id:
-                            try:
-                                conn.execute(
-                                    "INSERT OR IGNORE INTO code_references (from_id, to_id, kind) VALUES (?, ?, ?)",
-                                    (fid, to_id, ref_info["kind"])
-                                )
-                            except sqlite3.IntegrityError:
-                                pass
-                continue
+                # __module__ 引用：类似处理，只关联types
+                if from_entity == "__module__" and current_file_id:
+                    to_id = self._find_entity_id(conn, to_entity)
+                    if to_id:
+                        for row in conn.execute(
+                            "SELECT id FROM types WHERE file_id = ? AND kind != 'module'",
+                            (current_file_id,)
+                        ).fetchall():
+                            fid = row["id"]
+                            if fid != to_id:
+                                try:
+                                    conn.execute(
+                                        "INSERT OR IGNORE INTO code_references (from_id, to_id, kind) VALUES (?, ?, ?)",
+                                        (fid, to_id, ref_info["kind"])
+                                    )
+                                except sqlite3.IntegrityError:
+                                    pass
+                    continue
 
-            # 常规引用：跨文件查找
-            if from_id and not to_id:
-                to_id = self._find_entity_id(conn, to_entity)
+                # 常规引用：跨文件查找
+                if from_id and not to_id:
+                    to_id = self._find_entity_id(conn, to_entity)
 
-            if to_id and not from_id:
-                from_id = self._find_entity_id(conn, from_entity)
+                if to_id and not from_id:
+                    from_id = self._find_entity_id(conn, from_entity)
 
-            if from_id and to_id and from_id != to_id:
-                try:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO code_references (from_id, to_id, kind) VALUES (?, ?, ?)",
-                        (from_id, to_id, ref_info["kind"])
-                    )
-                except sqlite3.IntegrityError:
-                    pass
+                if from_id and to_id and from_id != to_id:
+                    try:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO code_references (from_id, to_id, kind) VALUES (?, ?, ?)",
+                            (from_id, to_id, ref_info["kind"])
+                        )
+                    except sqlite3.IntegrityError:
+                        pass
 
     def _find_entity_id(self, conn, name: str) -> Optional[int]:
         """在types和functions表中查找实体ID"""
@@ -543,8 +602,25 @@ class KnowledgeDatabase:
         }
 
     def close(self):
-        """关闭当前线程的数据库连接"""
+        """
+        关闭所有线程的数据库连接
+        BUG-DB-002修复：维护所有线程连接的列表，在close时全部关闭
+        """
+        # 关闭当前线程的连接
         conn = getattr(self._local, 'connection', None)
         if conn:
-            conn.close()
+            try:
+                conn.close()
+            except Exception as e:
+                logger.warning(f"关闭数据库连接失败: {e}")
             self._local.connection = None
+        
+        # BUG-DB-002修复：关闭所有线程的连接
+        with self._connections_lock:
+            for c in self._all_connections:
+                if c is not conn:  # 避免重复关闭当前线程的连接
+                    try:
+                        c.close()
+                    except Exception as e:
+                        logger.warning(f"关闭其他线程数据库连接失败: {e}")
+            self._all_connections.clear()

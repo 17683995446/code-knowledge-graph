@@ -3,12 +3,24 @@ SiliconFlow Client - 硅基流动LLM客户端
 使用硅基流动免费模型进行代码智能分析
 """
 
+import asyncio
+import random
 import httpx
 import json
 import logging
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
+
+
+class RateLimitError(Exception):
+    """
+    API限流异常
+    BUG-LLM-05修复：用于处理429状态码
+    """
+    def __init__(self, message: str, retry_after: Optional[float] = None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class SiliconFlowClient:
@@ -36,17 +48,46 @@ class SiliconFlowClient:
                                      graph_summary: Dict[str, Any]) -> Optional[str]:
         """分析代码结构并生成洞察"""
         prompt = self._build_structure_prompt(stats, graph_summary)
-        return await self._chat(prompt)
+        return await self._chat_with_retry(prompt)
 
     async def analyze_file_relationships(self, dependency_data: Dict[str, Any]) -> Optional[str]:
         """分析文件间依赖关系"""
         prompt = self._build_dependency_prompt(dependency_data)
-        return await self._chat(prompt)
+        return await self._chat_with_retry(prompt)
 
     async def generate_architecture_insight(self, project_info: Dict[str, Any]) -> Optional[str]:
         """生成架构洞察"""
         prompt = self._build_architecture_prompt(project_info)
-        return await self._chat(prompt)
+        return await self._chat_with_retry(prompt)
+
+    async def _chat_with_retry(self, prompt: str, max_tokens: int = 2000, max_retries: int = 3) -> Optional[str]:
+        """
+        带重试的聊天请求
+        BUG-LLM-04修复：添加指数退避重试机制
+        BUG-LLM-05修复：处理API限流(429状态码)
+        """
+        for attempt in range(max_retries):
+            try:
+                result = await self._chat(prompt, max_tokens)
+                if result is not None:
+                    return result
+                # None结果可能是临时问题，重试
+            except RateLimitError as e:
+                # BUG-LLM-05修复：处理429限流，使用Retry-After头
+                if attempt == max_retries - 1:
+                    logger.error(f"API限流，已达最大重试次数: {e}")
+                    raise
+                wait_time = e.retry_after if e.retry_after else (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(f"API限流，等待 {wait_time:.1f} 秒后重试 (尝试 {attempt + 1}/{max_retries})")
+                await asyncio.sleep(wait_time)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
+                # 指数退避
+                wait_time = (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(f"请求失败，等待 {wait_time:.1f} 秒后重试: {e}")
+                await asyncio.sleep(wait_time)
+        return None
 
     async def _chat(self, prompt: str, max_tokens: int = 2000) -> Optional[str]:
         """发送聊天请求到硅基流动API
@@ -80,6 +121,16 @@ class SiliconFlowClient:
                     data = response.json()
                     # BUG-LLM-03修复：更完整的响应解析
                     return self._parse_response(data)
+                elif response.status_code == 429:
+                    # BUG-LLM-05修复：处理API限流(429状态码)
+                    retry_after = None
+                    retry_after_header = response.headers.get("Retry-After")
+                    if retry_after_header:
+                        try:
+                            retry_after = float(retry_after_header)
+                        except ValueError:
+                            pass
+                    raise RateLimitError(f"API限流: {response.text}", retry_after)
                 else:
                     logger.error(f"硅基流动API错误: {response.status_code} - {response.text}")
                     return None
