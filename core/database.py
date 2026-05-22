@@ -154,22 +154,60 @@ class KnowledgeDatabase:
     def _backup_and_rebuild_database(self):
         """
         BUG-DB-RECV-001修复：备份损坏的数据库并重建
+        BUG-DB-RECV-002修复：尝试从损坏数据库恢复数据，避免完全丢失
         """
         try:
             # 生成备份文件名（带时间戳）
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_path = f"{self.database_path}.corrupted_{timestamp}"
+            recovery_db_path = f"{self.database_path}.recovery_{timestamp}.db"
+            
+            # BUG-DB-RECV-002修复：先尝试从损坏数据库恢复数据
+            recovery_success = False
+            if os.path.exists(self.database_path):
+                try:
+                    # 尝试使用.dump命令导出数据
+                    conn = sqlite3.connect(self.database_path, timeout=5.0)
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    
+                    # 创建恢复数据库
+                    recovery_conn = sqlite3.connect(recovery_db_path)
+                    
+                    # 尝试复制数据
+                    for line in conn.iterdump():
+                        try:
+                            recovery_conn.execute(line)
+                        except sqlite3.Error:
+                            pass  # 忽略无法恢复的数据
+                    
+                    recovery_conn.commit()
+                    recovery_conn.close()
+                    conn.close()
+                    
+                    logger.info(f"数据已恢复到: {recovery_db_path}")
+                    recovery_success = True
+                except Exception as e:
+                    logger.warning(f"数据恢复尝试失败: {e}")
             
             # 备份损坏的数据库文件
             if os.path.exists(self.database_path):
                 shutil.move(self.database_path, backup_path)
                 logger.info(f"损坏的数据库已备份到: {backup_path}")
             
-            # 删除可能的WAL和SHM文件
-            for ext in ["-wal", "-shm"]:
-                wal_path = f"{self.database_path}{ext}"
-                if os.path.exists(wal_path):
-                    os.remove(wal_path)
+            # BUG-DB-RECV-002修复：如果恢复成功，使用恢复的数据库
+            if recovery_success and os.path.exists(recovery_db_path):
+                shutil.move(recovery_db_path, self.database_path)
+                logger.info(f"使用恢复的数据库替换损坏的数据库")
+            else:
+                # 删除可能的WAL和SHM文件
+                for ext in ["-wal", "-shm"]:
+                    wal_path = f"{self.database_path}{ext}"
+                    if os.path.exists(wal_path):
+                        os.remove(wal_path)
+                
+                # 清理恢复失败的临时文件
+                if os.path.exists(recovery_db_path):
+                    os.remove(recovery_db_path)
                     
             logger.info("数据库已重建")
             
@@ -635,9 +673,17 @@ class KnowledgeDatabase:
             "references": references
         }
 
-    def get_dependency_graph(self) -> Dict[str, Any]:
-        """获取文件级别的依赖图"""
+    def get_dependency_graph(self, limit: int = 10000) -> Dict[str, Any]:
+        """
+        获取文件级别的依赖图
+        BUG-DB-MEM-003修复: 添加limit参数限制返回的依赖数量，防止内存溢出
+        """
+        # 限制最大值为50000，防止内存溢出
+        if limit > 50000:
+            limit = 50000
+            
         conn = self._get_connection()
+        # BUG-DB-MEM-003修复: 添加LIMIT限制查询结果数量
         file_deps = conn.execute("""
             SELECT f1.path as from_file, f2.path as to_file, r.kind
             FROM code_references r
@@ -650,7 +696,8 @@ class KnowledgeDatabase:
             JOIN functions fn1 ON r.from_id = fn1.id JOIN files f1 ON fn1.file_id = f1.id
             JOIN functions fn2 ON r.to_id = fn2.id JOIN files f2 ON fn2.file_id = f2.id
             WHERE f1.path != f2.path
-        """).fetchall()
+            LIMIT ?
+        """, (limit,)).fetchall()
 
         nodes = set()
         edges = []

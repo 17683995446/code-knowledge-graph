@@ -80,10 +80,18 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
         logger.info(f"正在全量同步项目: {project_path}")
         # BUG-API-02修复：在线程池中执行全量同步，避免阻塞事件循环
         # BUG-SVR-02修复：添加异常处理，确保全量同步失败不导致启动崩溃
+        # BUG-SVR-TIME-001修复：添加超时控制，防止全量同步无限阻塞
         try:
             loop = asyncio.get_event_loop()
-            sync_result = await loop.run_in_executor(None, update_engine.full_sync)
+            # 使用wait_for添加10分钟超时控制
+            sync_result = await asyncio.wait_for(
+                loop.run_in_executor(None, update_engine.full_sync),
+                timeout=600  # 10分钟超时
+            )
             logger.info(f"全量同步完成: {sync_result}")
+        except asyncio.TimeoutError:
+            logger.error("全量同步超时（超过10分钟），服务将以部分同步数据启动")
+            sync_result = {"total": 0, "updated": 0, "error": "timeout", "timeout": True}
         except Exception as e:
             logger.error(f"全量同步失败: {e}")
             # 即使同步失败也继续启动，允许服务以空数据库运行

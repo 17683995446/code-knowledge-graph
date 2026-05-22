@@ -477,14 +477,16 @@ class UpdateEngine:
 
         # 第一阶段：提取所有实体（不建立跨文件引用）
         logger.info(f"全量同步第一阶段: 提取{len(files_to_process)}个文件的实体...")
-        parse_results = {}  # file_path -> (file_id, parse_result)
+        # BUG-UE-MEM-001修复：使用列表存储文件ID，避免parse_result占用大量内存
+        file_ids_list = []  # 只存储file_id，不存储完整的parse_result
         processed_files = list(already_processed)  # BUG-UE-RECV-004: 从已处理文件开始
         
         for i, file_path in enumerate(files_to_process):
             try:
                 file_id, parse_result = self._update_single_file_phase1(file_path)
                 if file_id:
-                    parse_results[file_path] = (file_id, parse_result)
+                    # BUG-UE-MEM-001修复：只存储file_id，parse_result在第二阶段从数据库读取
+                    file_ids_list.append(file_id)
                     updated_files += 1
                     processed_files.append(file_path)  # BUG-UE-RECV-004: 记录已处理文件
                     
@@ -499,13 +501,22 @@ class UpdateEngine:
         self._save_checkpoint(processed_files, len(files_to_process), phase=2)
 
         # 第二阶段：建立跨文件引用关系
+        # BUG-UE-MEM-001修复：分批处理，每批1000个文件，处理完立即释放内存
         logger.info(f"全量同步第二阶段: 建立{updated_files}个文件的引用关系...")
-        for file_path, (file_id, parse_result) in parse_results.items():
-            try:
-                if parse_result and parse_result.references:
-                    self._store_references_only(file_id, parse_result)
-            except Exception as exception:
-                logger.error(f"引用关系建立失败 {file_path}: {exception}")
+        BATCH_SIZE = 1000  # 每批处理1000个文件
+        for batch_start in range(0, len(file_ids_list), BATCH_SIZE):
+            batch_file_ids = file_ids_list[batch_start:batch_start + BATCH_SIZE]
+            for file_id in batch_file_ids:
+                try:
+                    # BUG-UE-MEM-001修复：从数据库读取parse_result，不占用内存
+                    parse_result = self._load_parse_result_from_db(file_id)
+                    if parse_result and parse_result.references:
+                        self._store_references_only(file_id, parse_result)
+                except Exception as exception:
+                    logger.error(f"引用关系建立失败 file_id={file_id}: {exception}")
+            # BUG-UE-MEM-001修复：强制垃圾回收，释放内存
+            import gc
+            gc.collect()
 
         # BUG-UE-004修复：同步成功后删除备份表
         try:
@@ -742,3 +753,75 @@ class UpdateEngine:
     def has_pending_checkpoint(self) -> bool:
         """BUG-UE-RECV-004修复：检查是否有待恢复的检查点"""
         return self._load_checkpoint() is not None
+
+    def _load_parse_result_from_db(self, file_id: int):
+        """
+        BUG-UE-MEM-001修复：从数据库加载解析结果，避免内存占用
+        返回一个模拟的ParseResult对象，包含references信息
+        """
+        from parsers.base_parser import ParseResult, ReferenceInfo
+        
+        conn = self.database._get_connection()
+        
+        # 从数据库读取该文件的引用关系
+        references = []
+        
+        # 获取文件路径
+        file_row = conn.execute(
+            "SELECT path FROM files WHERE id = ?", (file_id,)
+        ).fetchone()
+        
+        if not file_row:
+            return None
+            
+        file_path = file_row["path"]
+        
+        # 读取types和functions以构建entity_id_map
+        type_ids = {}
+        for row in conn.execute("SELECT id, name FROM types WHERE file_id = ?", (file_id,)).fetchall():
+            type_ids[row["name"]] = row["id"]
+        
+        func_ids = {}
+        for row in conn.execute(
+            "SELECT f.id, f.name, t.name as type_name FROM functions f "
+            "LEFT JOIN types t ON f.type_id = t.id WHERE f.file_id = ?", (file_id,)
+        ).fetchall():
+            type_name = row['type_name'] or ""
+            composite_key = f"{row['name']}@{type_name}"
+            func_ids[composite_key] = row["id"]
+            if row["name"] not in func_ids:
+                func_ids[row["name"]] = row["id"]
+        
+        # 构建entity_id_map
+        entity_id_map = {**type_ids, **func_ids}
+        
+        # 从code_references表读取引用关系
+        all_ids = list(type_ids.values()) + list(func_ids.values())
+        if all_ids:
+            placeholders = ",".join("?" * len(all_ids))
+            for row in conn.execute(
+                f"SELECT from_id, to_id, kind FROM code_references WHERE from_id IN ({placeholders})",
+                tuple(all_ids)
+            ).fetchall():
+                # 查找from_entity和to_entity的名称
+                from_name = None
+                to_name = None
+                for name, eid in entity_id_map.items():
+                    if eid == row["from_id"]:
+                        from_name = name
+                    if eid == row["to_id"]:
+                        to_name = name
+                    if from_name and to_name:
+                        break
+                
+                if from_name and to_name:
+                    references.append(ReferenceInfo(
+                        from_entity=from_name,
+                        to_entity=to_name,
+                        kind=row["kind"]
+                    ))
+        
+        # 创建ParseResult对象（只包含references）
+        result = ParseResult()
+        result.references = references
+        return result

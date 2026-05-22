@@ -152,10 +152,22 @@ class WebSocketManager:
         })
 
     async def send_stats_update(self, stats: dict):
-        """发送统计信息更新"""
+        """
+        发送统计信息更新
+        BUG-SVR-MEM-004修复：限制stats数据大小，防止大数据广播
+        """
+        # BUG-SVR-MEM-004修复：限制stats数据大小，只发送关键统计信息
+        limited_stats = {
+            "total_files": stats.get("total_files", 0),
+            "total_types": stats.get("total_types", 0),
+            "total_functions": stats.get("total_functions", 0),
+            "total_calls": stats.get("total_calls", 0),
+            "total_references": stats.get("total_references", 0),
+            "languages": stats.get("languages", {}),
+        }
         await self.broadcast({
             "type": "stats_update",
-            "data": stats
+            "data": limited_stats
         })
 
     async def start_heartbeat_check(self):
