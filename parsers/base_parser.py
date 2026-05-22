@@ -4,12 +4,16 @@ Base Parser - 通用解析器接口
 基于第一性原理：所有语言共享同一套解析结果格式
 """
 
+import os
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+# BUG-PARSER-INPUT-003修复: 定义最大文件大小常量
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 
 @dataclass
@@ -90,6 +94,21 @@ class BaseParser(ABC):
         import os
         ext = os.path.splitext(file_path)[1].lower()
         return ext in self.file_extensions
+
+    def check_file_size(self, file_path: str) -> bool:
+        """
+        BUG-PARSER-INPUT-003修复: 检查文件大小是否超过限制
+        返回True表示文件大小正常，False表示文件过大
+        """
+        try:
+            file_size = os.path.getsize(file_path)
+            if file_size > MAX_FILE_SIZE:
+                logger.warning(f"文件过大，跳过解析: {file_path} (大小: {file_size / 1024 / 1024:.2f}MB)")
+                return False
+            return True
+        except OSError as e:
+            logger.warning(f"无法获取文件大小: {file_path}, 错误: {e}")
+            return False
 
     @staticmethod
     def compute_end_line(lines: list, start_line: int,

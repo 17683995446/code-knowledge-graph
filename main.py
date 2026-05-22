@@ -13,6 +13,7 @@ import signal
 import click
 import logging
 import asyncio
+import platform
 from pathlib import Path
 
 # 将项目根目录加入Python路径
@@ -27,6 +28,7 @@ import uvicorn
 # BUG-MAIN-01修复: 全局变量用于优雅关闭
 _shutdown_event = None
 _update_engine = None
+_db_instance = None  # BUG-MAIN-03修复：数据库实例引用，用于清理资源
 
 
 def setup_logging(verbose: bool = False):
@@ -42,25 +44,38 @@ def setup_logging(verbose: bool = False):
 
 
 def signal_handler(signum, frame):
-    """BUG-MAIN-01修复: 信号处理器，支持优雅关闭"""
+    """BUG-MAIN-01修复: 信号处理器，支持优雅关闭
+    BUG-MAIN-02修复: 检查变量是否为None
+    BUG-MAIN-03修复: 强制退出前尝试清理资源
+    """
     logger = logging.getLogger("main")
     logger.info(f"收到信号 {signum}，正在优雅关闭...")
     
-    # 停止更新引擎
+    # BUG-MAIN-02修复: 停止更新引擎前检查是否为None
     global _update_engine
-    if _update_engine:
+    if _update_engine is not None:
         try:
             _update_engine.stop()
             logger.info("更新引擎已停止")
         except Exception as e:
             logger.error(f"停止更新引擎失败: {e}")
     
-    # 设置关闭事件
+    # BUG-MAIN-03修复: 尝试清理数据库资源
+    global _db_instance
+    if _db_instance is not None:
+        try:
+            _db_instance.close()
+            logger.info("数据库连接已关闭")
+        except Exception as e:
+            logger.error(f"关闭数据库连接失败: {e}")
+    
+    # BUG-MAIN-02修复: 设置关闭事件前检查是否为None
     global _shutdown_event
-    if _shutdown_event:
+    if _shutdown_event is not None:
         _shutdown_event.set()
     
     # 强制退出（作为最后手段）
+    # BUG-MAIN-03修复: 强制退出前已尝试清理资源
     import threading
     def force_exit():
         import time
@@ -93,8 +108,18 @@ def main(project_path: str, port: int, host: str, db: str, api_key: str, verbose
     _shutdown_event = asyncio.Event()
     
     signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    logger.info("已注册信号处理器 (SIGINT, SIGTERM)")
+    # BUG-MAIN-04修复: Windows平台SIGTERM不可用，使用SIGBREAK或跳过
+    if platform.system() == "Windows":
+        # Windows平台：SIGTERM不可用，使用SIGBREAK替代
+        try:
+            signal.signal(signal.SIGBREAK, signal_handler)  # type: ignore
+            logger.info("已注册信号处理器 (SIGINT, SIGBREAK)")
+        except (AttributeError, ValueError):
+            logger.info("已注册信号处理器 (SIGINT)")
+    else:
+        # Unix/Linux平台：正常注册SIGTERM
+        signal.signal(signal.SIGTERM, signal_handler)
+        logger.info("已注册信号处理器 (SIGINT, SIGTERM)")
 
     project_path = os.path.abspath(project_path)
     if not os.path.isdir(project_path):

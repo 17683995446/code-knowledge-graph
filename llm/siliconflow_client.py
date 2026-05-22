@@ -135,11 +135,13 @@ class SiliconFlowClient:
                     logger.error(f"硅基流动API错误: {response.status_code} - {response.text}")
                     return None
         except httpx.TimeoutException:
-            logger.error(f"硅基流动API请求超时(>{self.timeout}秒)")
-            return None
+            # BUG-LLM-07/08修复：超时时抛出异常，让外层_chat_with_retry捕获并重试
+            logger.warning(f"硅基流动API请求超时(>{self.timeout}秒)，将重试")
+            raise
         except httpx.ConnectError as e:
-            logger.error(f"硅基流动API连接错误: {e}")
-            return None
+            # BUG-LLM-07/08修复：连接错误时抛出异常，让外层_chat_with_retry捕获并重试
+            logger.warning(f"硅基流动API连接错误: {e}，将重试")
+            raise
         except json.JSONDecodeError as e:
             logger.error(f"硅基流动API响应JSON解析错误: {e}")
             return None
@@ -165,6 +167,11 @@ class SiliconFlowClient:
         if not isinstance(first_choice, dict):
             logger.warning(f"第一个choice不是字典类型: {type(first_choice)}")
             return None
+
+        # BUG-LLM-11修复：检查finish_reason，检测响应截断
+        finish_reason = first_choice.get("finish_reason")
+        if finish_reason == "length":
+            logger.warning("LLM响应被截断，结果可能不完整")
 
         message = first_choice.get("message", {})
         if not isinstance(message, dict):

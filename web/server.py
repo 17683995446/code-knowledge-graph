@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 # BUG-MAIN-01修复: 全局变量用于优雅关闭
 _global_update_engine = None
 # BUG-SVR-08修复: 全量同步锁，防止并发全量同步
-_sync_lock = threading.Lock()
+# BUG-SVR-CONC-002修复: 使用asyncio.Lock替代threading.Lock，适配异步上下文
+# 注意：asyncio.Lock需要在事件循环中初始化，这里声明为None，在create_app中初始化
+_sync_lock = None
 
 
 def create_app(project_path: str, database_path: str = "code_knowledge.db",
@@ -69,6 +71,9 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
     # BUG-MAIN-01修复: 设置全局update_engine引用
     global _global_update_engine
     _global_update_engine = update_engine
+    # BUG-SVR-CONC-002修复: 在事件循环中初始化asyncio.Lock
+    global _sync_lock
+    _sync_lock = asyncio.Lock()
 
     @app.on_event("startup")
     async def startup_event():
@@ -111,9 +116,20 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
         return stats
 
     @app.get("/api/graph")
-    async def get_graph_data():
+    async def get_graph_data(limit: int = 5000):
+        """
+        BUG-SVR-MEM-003修复: 添加limit参数，超过阈值返回错误提示
+        """
+        # 限制最大值为10000，防止内存溢出
+        if limit > 10000:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "limit参数超过最大值10000，请减少请求数量"}
+            )
         # BUG-CROSS-001修复：使用run_in_executor避免阻塞事件循环
-        return await asyncio.get_running_loop().run_in_executor(None, database.get_graph_data)
+        return await asyncio.get_running_loop().run_in_executor(
+            None, lambda: database.get_graph_data(limit)
+        )
 
     @app.get("/api/dependency-graph")
     async def get_dependency_graph():
@@ -158,14 +174,20 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
         """
         触发全量同步
         BUG-SVR-08修复：添加同步锁防止并发全量同步
+        BUG-SVR-CONC-002修复：使用asyncio.Lock替代threading.Lock
         """
         # 检查是否已有同步在进行
-        if not _sync_lock.acquire(blocking=False):
+        if _sync_lock is None:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "服务初始化中，请稍后重试"}
+            )
+        if _sync_lock.locked():
             return JSONResponse(
                 status_code=429,
                 content={"error": "已有全量同步正在进行中，请稍后重试"}
             )
-        try:
+        async with _sync_lock:
             # BUG-API-01修复：在线程池中执行全量同步
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, update_engine.full_sync)
@@ -174,8 +196,6 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
                 "data": {"timestamp": datetime.now().isoformat(), **result}
             })
             return result
-        finally:
-            _sync_lock.release()
 
     @app.get("/api/analysis/structure")
     async def analyze_structure():

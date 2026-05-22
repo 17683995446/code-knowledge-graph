@@ -104,8 +104,14 @@ class JavaScriptParser(BaseParser):
     def parse_file(self, file_path: str) -> ParseResult:
         """解析JavaScript/TypeScript文件
         BUG-JS-02修复：尝试多种编码，添加异常日志
+        BUG-PARSER-INPUT-003修复：添加文件大小检查
         """
         result = ParseResult()
+        
+        # BUG-PARSER-INPUT-003修复：检查文件大小
+        if not self.check_file_size(file_path):
+            return result
+        
         source_code = None
 
         # BUG-JS-02修复：尝试多种编码

@@ -9,6 +9,8 @@ import hashlib
 import os
 import threading
 import logging
+import shutil
+from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
 
@@ -90,10 +92,13 @@ class KnowledgeDatabase:
         self.database_path = database_path
         self._local = threading.local()
         self._lock = threading.Lock()
-        self._write_lock = threading.Lock()  # BUG-DB-003修复: 写入锁保护WAL并发写入
+        self._write_lock = threading.RLock()  # BUG-DB-CONC-001修复: 使用RLock避免死锁
         # BUG-DB-002修复：维护所有线程连接的列表
         self._all_connections: List[sqlite3.Connection] = []
         self._connections_lock = threading.Lock()
+        
+        # BUG-DB-RECV-001修复：检测数据库完整性，损坏时自动备份并重建
+        self._check_and_recover_database()
         
         # BUG-DB-009修复：建表失败时进行清理
         conn = None
@@ -116,6 +121,60 @@ class KnowledgeDatabase:
                     self._all_connections.remove(conn)
             if hasattr(self._local, 'connection'):
                 self._local.connection = None
+            raise
+
+    def _check_and_recover_database(self):
+        """
+        BUG-DB-RECV-001修复：检测数据库完整性，损坏时自动备份并重建
+        """
+        if not os.path.exists(self.database_path):
+            # 数据库不存在，无需检查
+            return
+        
+        # 检查数据库完整性
+        try:
+            conn = sqlite3.connect(self.database_path, timeout=5.0)
+            result = conn.execute("PRAGMA integrity_check").fetchone()
+            conn.close()
+            
+            if result and result[0] == "ok":
+                # 数据库完整，无需恢复
+                return
+            
+            # 数据库损坏，进行恢复
+            logger.warning(f"数据库损坏，正在备份并重建: {self.database_path}")
+            self._backup_and_rebuild_database()
+            
+        except sqlite3.DatabaseError as e:
+            logger.warning(f"数据库损坏或无法访问: {e}，正在备份并重建")
+            self._backup_and_rebuild_database()
+        except Exception as e:
+            logger.error(f"数据库完整性检查失败: {e}")
+
+    def _backup_and_rebuild_database(self):
+        """
+        BUG-DB-RECV-001修复：备份损坏的数据库并重建
+        """
+        try:
+            # 生成备份文件名（带时间戳）
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = f"{self.database_path}.corrupted_{timestamp}"
+            
+            # 备份损坏的数据库文件
+            if os.path.exists(self.database_path):
+                shutil.move(self.database_path, backup_path)
+                logger.info(f"损坏的数据库已备份到: {backup_path}")
+            
+            # 删除可能的WAL和SHM文件
+            for ext in ["-wal", "-shm"]:
+                wal_path = f"{self.database_path}{ext}"
+                if os.path.exists(wal_path):
+                    os.remove(wal_path)
+                    
+            logger.info("数据库已重建")
+            
+        except Exception as e:
+            logger.error(f"数据库备份重建失败: {e}")
             raise
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -457,8 +516,10 @@ class KnowledgeDatabase:
 
         return stats
 
-    def get_graph_data(self) -> Dict[str, Any]:
-        """获取完整的图谱数据用于可视化"""
+    def get_graph_data(self, limit: int = 5000) -> Dict[str, Any]:
+        """获取完整的图谱数据用于可视化
+        BUG-DB-MEM-001修复: 添加limit参数限制返回节点和边的数量
+        """
         conn = self._get_connection()
         nodes = []
         edges = []
@@ -467,10 +528,12 @@ class KnowledgeDatabase:
         valid_type_ids = set()
         valid_func_ids = set()
 
+        # BUG-DB-MEM-001修复: 添加LIMIT限制查询结果数量
         type_rows = conn.execute("""
             SELECT t.id, t.name, t.kind, t.flags, t.file_id, f.path as file_path, f.language
             FROM types t JOIN files f ON t.file_id = f.id
-        """).fetchall()
+            LIMIT ?
+        """, (limit,)).fetchall()
         for row in type_rows:
             valid_type_ids.add(row["id"])
             nodes.append({
@@ -485,7 +548,8 @@ class KnowledgeDatabase:
         func_rows = conn.execute("""
             SELECT fn.id, fn.name, fn.file_id, f.path as file_path, f.language
             FROM functions fn JOIN files f ON fn.file_id = f.id
-        """).fetchall()
+            LIMIT ?
+        """, (limit,)).fetchall()
         for row in func_rows:
             valid_func_ids.add(row["id"])
             nodes.append({
@@ -498,7 +562,8 @@ class KnowledgeDatabase:
             })
 
         # 调用关系 - 只保留两端都存在的边
-        call_rows = conn.execute("SELECT caller_id, callee_id FROM calls").fetchall()
+        # BUG-DB-MEM-001修复: 添加LIMIT限制边数量
+        call_rows = conn.execute("SELECT caller_id, callee_id FROM calls LIMIT ?", (limit,)).fetchall()
         for row in call_rows:
             if row["caller_id"] in valid_func_ids and row["callee_id"] in valid_func_ids:
                 edges.append({
@@ -508,9 +573,11 @@ class KnowledgeDatabase:
                 })
 
         # 引用关系 - 只保留两端都存在的边，正确判断类型
+        # BUG-DB-MEM-001修复: 添加LIMIT限制边数量
         ref_rows = conn.execute("""
             SELECT from_id, to_id, kind FROM code_references
-        """).fetchall()
+            LIMIT ?
+        """, (limit,)).fetchall()
         for row in ref_rows:
             from_id = row["from_id"]
             to_id = row["to_id"]
@@ -605,10 +672,18 @@ class KnowledgeDatabase:
         """
         关闭所有线程的数据库连接
         BUG-DB-002修复：维护所有线程连接的列表，在close时全部关闭
+        BUG-DB-OTHER-001修复：关闭前执行WAL checkpoint确保数据持久化
         """
-        # 关闭当前线程的连接
+        # BUG-DB-OTHER-001修复：关闭前执行WAL checkpoint
         conn = getattr(self._local, 'connection', None)
         if conn:
+            try:
+                # 执行WAL checkpoint，将WAL文件内容合并到主数据库
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.commit()
+                logger.debug("WAL checkpoint已完成")
+            except Exception as e:
+                logger.warning(f"执行WAL checkpoint失败: {e}")
             try:
                 conn.close()
             except Exception as e:
@@ -620,6 +695,12 @@ class KnowledgeDatabase:
             for c in self._all_connections:
                 if c is not conn:  # 避免重复关闭当前线程的连接
                     try:
+                        # BUG-DB-OTHER-001修复：对每个连接执行checkpoint
+                        try:
+                            c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                            c.commit()
+                        except Exception:
+                            pass
                         c.close()
                     except Exception as e:
                         logger.warning(f"关闭其他线程数据库连接失败: {e}")

@@ -92,8 +92,14 @@ class PythonParser(BaseParser):
     def parse_file(self, file_path: str) -> ParseResult:
         """解析Python文件
         BUG-PY-01修复：尝试多种编码，而非仅utf-8
+        BUG-PARSER-INPUT-003修复：添加文件大小检查
         """
         result = ParseResult()
+        
+        # BUG-PARSER-INPUT-003修复：检查文件大小
+        if not self.check_file_size(file_path):
+            return result
+        
         source_code = None
 
         # BUG-PY-01修复：尝试多种编码
@@ -128,6 +134,9 @@ class PythonParser(BaseParser):
         except SyntaxError as e:
             # 记录语法错误但不崩溃（如缩进层级超限）
             logger.warning(f"Python语法错误 {file_path}: {e}")
+        except RecursionError:
+            # BUG-PY-RECURSION-01修复：捕获AST嵌套过深的递归错误
+            logger.warning(f"AST嵌套过深，跳过解析: {file_path}")
         except Exception as e:
             # 记录其他解析错误
             logger.warning(f"Python解析失败 {file_path}: {e}")
