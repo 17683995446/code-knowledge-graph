@@ -455,6 +455,7 @@ class KnowledgeDatabase:
         BUG-REF-03修复：同时查types和functions表
         BUG-REF-04修复：__imports__引用自动关联当前文件所有实体
         BUG-DB-003修复: 使用写入锁保护并发写入
+        BUG-DB-FILEID-01修复：current_file_id默认值改为None，避免0被误判
         """
         conn = self._get_connection()
         with self._write_lock:  # BUG-DB-003修复: 加写入锁
@@ -466,7 +467,8 @@ class KnowledgeDatabase:
 
                 # __imports__ 引用：表示当前文件导入了 to_entity
                 # 只将当前文件的types（类/接口）作为 from_id，不关联functions
-                if from_entity == "__imports__" and current_file_id:
+                # BUG-DB-FILEID-01修复：使用is not None检查，避免0被误判
+                if from_entity == "__imports__" and current_file_id is not None and current_file_id > 0:
                     to_id = self._find_entity_id(conn, to_entity)
                     if to_id:
                         for row in conn.execute(
@@ -485,7 +487,7 @@ class KnowledgeDatabase:
                     continue
 
                 # __module__ 引用：类似处理，只关联types
-                if from_entity == "__module__" and current_file_id:
+                if from_entity == "__module__" and current_file_id is not None and current_file_id > 0:
                     to_id = self._find_entity_id(conn, to_entity)
                     if to_id:
                         for row in conn.execute(
@@ -717,6 +719,7 @@ class KnowledgeDatabase:
             
         conn = self._get_connection()
         # BUG-DB-MEM-003修复: 添加LIMIT限制查询结果数量
+        # BUG-DB-CROSS-DEP-01修复：添加跨类型依赖（type<->function）
         file_deps = conn.execute("""
             SELECT f1.path as from_file, f2.path as to_file, r.kind
             FROM code_references r
@@ -728,6 +731,18 @@ class KnowledgeDatabase:
             FROM code_references r
             JOIN functions fn1 ON r.from_id = fn1.id JOIN files f1 ON fn1.file_id = f1.id
             JOIN functions fn2 ON r.to_id = fn2.id JOIN files f2 ON fn2.file_id = f2.id
+            WHERE f1.path != f2.path
+            UNION ALL
+            SELECT f1.path as from_file, f2.path as to_file, r.kind
+            FROM code_references r
+            JOIN types t1 ON r.from_id = t1.id JOIN files f1 ON t1.file_id = f1.id
+            JOIN functions fn2 ON r.to_id = fn2.id JOIN files f2 ON fn2.file_id = f2.id
+            WHERE f1.path != f2.path
+            UNION ALL
+            SELECT f1.path as from_file, f2.path as to_file, r.kind
+            FROM code_references r
+            JOIN functions fn1 ON r.from_id = fn1.id JOIN files f1 ON fn1.file_id = f1.id
+            JOIN types t2 ON r.to_id = t2.id JOIN files f2 ON t2.file_id = f2.id
             WHERE f1.path != f2.path
             LIMIT ?
         """, (limit,)).fetchall()

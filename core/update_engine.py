@@ -148,7 +148,11 @@ class UpdateEngine:
         with self._stats_lock:  # BUG-UE-001修复: 加锁保护stats
             self.stats["total_updates"] += 1
             self.stats["last_update_time"] = datetime.now().isoformat()
-            self.stats["errors"] = errors[-100:]
+            # BUG-AUDIT-029修复：追加错误而非覆盖，保留最近100条
+            if "errors" not in self.stats:
+                self.stats["errors"] = []
+            self.stats["errors"].extend(errors)
+            self.stats["errors"] = self.stats["errors"][-100:]
 
         # 通知回调（需要在async上下文中调用）
         # BUG-UPDATE-015修复: 回调异常隔离
@@ -188,17 +192,12 @@ class UpdateEngine:
 
         if event_type == "deleted":
             # BUG-SINGLE-01修复：添加异常保护，确保删除失败不导致整个批处理中断
+            # BUG-AUDIT-005修复：所有异常路径都执行rollback，确保数据库一致性
             try:
                 file_record = self.database.get_file_by_path(file_path)
                 if file_record:
                     self.database.delete_file_cascade(file_record.file_id)
                     self.database.commit()
-            except PermissionError as e:
-                logger.warning(f"权限不足，无法删除文件记录 {file_path}: {e}")
-            except IOError as e:
-                logger.warning(f"IO错误，无法删除文件记录 {file_path}: {e}")
-            except OSError as e:
-                logger.warning(f"系统错误，无法删除文件记录 {file_path}: {e}")
             except Exception as e:
                 logger.error(f"删除文件失败 {file_path}: {e}")
                 self.database.rollback()
@@ -504,6 +503,7 @@ class UpdateEngine:
         # BUG-UE-MEM-001修复：分批处理，每批1000个文件，处理完立即释放内存
         logger.info(f"全量同步第二阶段: 建立{updated_files}个文件的引用关系...")
         BATCH_SIZE = 1000  # 每批处理1000个文件
+        phase2_errors = 0  # BUG-AUDIT-026修复：记录第二阶段失败数
         for batch_start in range(0, len(file_ids_list), BATCH_SIZE):
             batch_file_ids = file_ids_list[batch_start:batch_start + BATCH_SIZE]
             for file_id in batch_file_ids:
@@ -514,9 +514,19 @@ class UpdateEngine:
                         self._store_references_only(file_id, parse_result)
                 except Exception as exception:
                     logger.error(f"引用关系建立失败 file_id={file_id}: {exception}")
+                    phase2_errors += 1
             # BUG-UE-MEM-001修复：强制垃圾回收，释放内存
             import gc
             gc.collect()
+
+        # BUG-AUDIT-026修复：如果第二阶段有失败，不清除检查点，允许下次恢复
+        if phase2_errors > 0:
+            logger.warning(f"第二阶段有 {phase2_errors} 个文件失败，保留检查点以便恢复")
+            # 更新检查点状态为需要重新执行第二阶段
+            self._save_checkpoint(processed_files, len(files_to_process), phase=2)
+        else:
+            # BUG-UE-RECV-004: 同步完成，清除检查点
+            self._clear_checkpoint()
 
         # BUG-UE-004修复：同步成功后删除备份表
         try:
@@ -527,9 +537,6 @@ class UpdateEngine:
             logger.debug("备份表已清理")
         except Exception as e:
             logger.warning(f"清理备份表失败: {e}")
-
-        # BUG-UE-RECV-004: 同步完成，清除检查点
-        self._clear_checkpoint()
 
         # BUG-UE-STATS-01修复：使用_stats_lock保护stats的读写操作
         with self._stats_lock:
@@ -670,10 +677,21 @@ class UpdateEngine:
         logger.info("文件监控已停止")
 
     async def flush(self):
-        """刷新待处理事件"""
-        # BUG-FLUSH-01修复：先获取锁取出batch，释放锁后再await
+        """刷新待处理事件
+        BUG-AUDIT-018修复：同时处理_event_queue和_pending_events中的事件
+        """
         batch = None
         with self._lock:
+            # BUG-AUDIT-018修复：先从event_queue中取出所有事件
+            while True:
+                try:
+                    file_path, event_type = self._event_queue.get_nowait()
+                    if file_path not in self._pending_events:
+                        self._pending_events[file_path] = set()
+                    self._pending_events[file_path].add(event_type)
+                except Exception:
+                    break
+            # BUG-FLUSH-01修复：先获取锁取出batch，释放锁后再await
             if self._pending_events:
                 batch = dict(self._pending_events)
                 self._pending_events.clear()
@@ -701,8 +719,11 @@ class UpdateEngine:
             "phase": phase
         }
         try:
-            with open(self._checkpoint_path, 'w', encoding='utf-8') as f:
+            # BUG-AUDIT-019修复：使用原子写入模式，先写临时文件再重命名
+            tmp_path = self._checkpoint_path + ".tmp"
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(checkpoint_data, f, ensure_ascii=False)
+            os.replace(tmp_path, self._checkpoint_path)
             logger.debug(f"检查点已保存: {len(processed_files)}/{total_files} 文件, 阶段{phase}")
         except Exception as e:
             logger.warning(f"保存检查点失败: {e}")
@@ -802,6 +823,22 @@ class UpdateEngine:
         # 构建entity_id_map
         entity_id_map = {**type_ids, **func_ids}
         
+        # BUG-AUDIT-024修复：构建反向映射，使用O(1)查找替代O(n*m)遍历
+        # 同时确保优先使用简单name而非复合key
+        id_to_name = {}
+        # 先添加type_ids（优先级低）
+        for name, eid in type_ids.items():
+            if eid not in id_to_name:
+                id_to_name[eid] = name
+        # 再添加func_ids的简单name（优先级高）
+        for name, eid in func_ids.items():
+            if "@" not in name:  # 简单name优先
+                id_to_name[eid] = name
+        # 最后添加复合key（最低优先级）
+        for name, eid in func_ids.items():
+            if "@" in name and eid not in id_to_name:
+                id_to_name[eid] = name
+        
         # 从code_references表读取引用关系
         all_ids = list(type_ids.values()) + list(func_ids.values())
         if all_ids:
@@ -810,16 +847,9 @@ class UpdateEngine:
                 f"SELECT from_id, to_id, kind FROM code_references WHERE from_id IN ({placeholders})",
                 tuple(all_ids)
             ).fetchall():
-                # 查找from_entity和to_entity的名称
-                from_name = None
-                to_name = None
-                for name, eid in entity_id_map.items():
-                    if eid == row["from_id"]:
-                        from_name = name
-                    if eid == row["to_id"]:
-                        to_name = name
-                    if from_name and to_name:
-                        break
+                # BUG-AUDIT-024修复：使用反向映射O(1)查找
+                from_name = id_to_name.get(row["from_id"])
+                to_name = id_to_name.get(row["to_id"])
                 
                 if from_name and to_name:
                     references.append(ReferenceInfo(

@@ -271,11 +271,24 @@ class PythonParser(BaseParser):
                     ))
 
     def _get_call_name(self, call_node: ast.Call) -> Optional[str]:
-        """获取调用函数名"""
+        """获取调用函数名
+        BUG-PY-CALL-01修复：对obj.method()形式返回完整属性链
+        """
         func = call_node.func
         if isinstance(func, ast.Name):
             return func.id
         elif isinstance(func, ast.Attribute):
+            # BUG-PY-CALL-01修复：返回完整属性链（如"obj.method"）
+            # 递归获取完整链
+            parts = []
+            node = func
+            while isinstance(node, ast.Attribute):
+                parts.append(node.attr)
+                node = node.value
+            if isinstance(node, ast.Name):
+                parts.append(node.id)
+            if parts:
+                return ".".join(reversed(parts))
             return func.attr
         return None
 

@@ -167,7 +167,9 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
         resolved_path = os.path.realpath(os.path.join(project_path, file_path))
         if not resolved_path.startswith(os.path.realpath(project_path) + os.sep) and resolved_path != os.path.realpath(project_path):
             raise HTTPException(status_code=400, detail="非法路径")
-        details = database.get_file_details(file_path)
+        # BUG-SVR-PATH-01修复：使用规范化后的相对路径查询数据库
+        normalized_path = os.path.relpath(resolved_path, os.path.realpath(project_path))
+        details = database.get_file_details(normalized_path)
         if not details:
             raise HTTPException(status_code=404, detail="文件未找到")
         return details
@@ -211,8 +213,10 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
     async def analyze_structure():
         if not llm_client:
             return JSONResponse(status_code=503, content={"error": "LLM未配置"})
-        stats = database.get_statistics()
-        graph_data = database.get_graph_data()
+        # BUG-SVR-BLOCK-01修复：使用run_in_executor避免阻塞事件循环
+        loop = asyncio.get_running_loop()
+        stats = await loop.run_in_executor(None, database.get_statistics)
+        graph_data = await loop.run_in_executor(None, lambda: database.get_graph_data(limit=5000))
         # BUG-SVR-03修复：添加60秒超时，防止LLM调用挂起
         try:
             analysis = await asyncio.wait_for(
@@ -235,7 +239,9 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
     async def analyze_dependencies():
         if not llm_client:
             return JSONResponse(status_code=503, content={"error": "LLM未配置"})
-        dep_graph = database.get_dependency_graph()
+        # BUG-SVR-BLOCK-01修复：使用run_in_executor避免阻塞事件循环
+        loop = asyncio.get_running_loop()
+        dep_graph = await loop.run_in_executor(None, lambda: database.get_dependency_graph(limit=10000))
         # BUG-SVR-03修复：添加60秒超时
         try:
             analysis = await asyncio.wait_for(

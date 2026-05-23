@@ -75,11 +75,16 @@ class JavaParser(BaseParser):
         return result
 
     def _extract_imports(self, lines: List[str], result: ParseResult):
-        """提取import语句"""
-        pattern = re.compile(r'import\s+(?:static\s+)?([\w.]+)(?:\.\*)?;')
+        """提取import语句
+        BUG-JAVA-WILDCARD-01修复：跳过通配符导入(.*)
+        """
+        pattern = re.compile(r'import\s+(?:static\s+)?([\w.]+)(\.\*)?;')
         for line in lines:
             match = pattern.search(line)
             if match:
+                # BUG-JAVA-WILDCARD-01修复：跳过通配符导入
+                if match.group(2):  # 检测到.*
+                    continue
                 full_path = match.group(1)
                 parts = full_path.split(".")
                 if len(parts) >= 2:
@@ -147,9 +152,10 @@ class JavaParser(BaseParser):
         BUG-JAVA-03修复：放宽方法匹配正则，支持方法体在下一行
         """
         # BUG-JAVA-03修复：放宽正则，不要求行尾有{
+        # BUG-JAVA-METHOD-01修复：限制返回类型匹配长度，避免匹配字段声明
         method_pattern = re.compile(
             r'^\s*(?:public|private|protected)?\s*(?:static|final|abstract|synchronized|native)?\s*'
-            r'(?:[\w<>\[\],\s]+)\s+(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*(?:\{?|$)'
+            r'(?:[\w<>\[\],\s]{1,60})\s+(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*(?:\{?|$)'
         )
         current_class = ""
         for line_num, line in enumerate(lines, 1):
@@ -173,8 +179,9 @@ class JavaParser(BaseParser):
                 # BUG-JAVA-03修复：更严格的过滤条件
                 if method_name in skip_words:
                     continue
-                if method_name[0].isupper():
-                    continue
+                # BUG-JAVA-UPPER-01修复：不再按首字母大写过滤方法
+                # 原逻辑会错误过滤构造函数、测试方法等合法方法
+                # 改为检查是否为Java关键字（已在skip_words中）
                 # 排除纯数字
                 if method_name.isdigit():
                     continue
