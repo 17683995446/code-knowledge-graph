@@ -531,8 +531,10 @@ class UpdateEngine:
         # BUG-UE-RECV-004: 同步完成，清除检查点
         self._clear_checkpoint()
 
-        self.stats["total_updates"] += 1
-        self.stats["last_update_time"] = datetime.now().isoformat()
+        # BUG-UE-STATS-01修复：使用_stats_lock保护stats的读写操作
+        with self._stats_lock:
+            self.stats["total_updates"] += 1
+            self.stats["last_update_time"] = datetime.now().isoformat()
         logger.info(f"全量同步完成: 共{total_files}个文件, 成功{updated_files}个")
         return {"total": total_files, "updated": updated_files}
 
@@ -553,7 +555,12 @@ class UpdateEngine:
             logger.warning(f"解析文件失败 {file_path}: {e}")
             parse_result = None
 
-        file_hash = self.database.compute_file_hash(file_path)
+        # BUG-UE-HASH-01修复：添加文件哈希计算异常处理
+        try:
+            file_hash = self.database.compute_file_hash(file_path)
+        except (FileNotFoundError, PermissionError, IOError, OSError) as e:
+            logger.warning(f"无法计算文件哈希 {file_path}: {e}")
+            return None, None
 
         try:
             file_id = self.database.upsert_file(file_path, language, file_hash)

@@ -122,7 +122,12 @@ class BaseParser(ABC):
         BUG-BP-002修复：扫描范围扩大到2000行
         BUG-BP-004修复：转义字符j+=2添加边界检查
         BUG-BP-005修复：增加反引号字符串支持
+        BUG-BP-BOUND-01修复：添加输入参数边界检查
         """
+        # BUG-BP-BOUND-01修复：输入参数边界检查
+        if not lines or start_line < 1 or start_line > len(lines):
+            return max(1, start_line) if start_line > 0 else 1
+        
         depth = 0
         found_first_brace = False
         in_string = None  # None, '"', "'", '`'

@@ -50,16 +50,22 @@ class WebSocketManager:
         BUG-WS-005修复：添加accept()异常保护
         BUG-WS-006修复：添加连接数上限保护
         BUG-WS-11修复：记录连接活跃时间
+        BUG-WS-LOCK-01修复：使用锁保护active_connections集合操作
         """
-        if len(self.active_connections) >= self.max_connections:
-            logger.warning(f"WebSocket连接数已达上限 {self.max_connections}，拒绝新连接")
-            await websocket.close(code=1013, reason="Too many connections")
-            return
+        async with self._broadcast_lock:
+            if len(self.active_connections) >= self.max_connections:
+                logger.warning(f"WebSocket连接数已达上限 {self.max_connections}，拒绝新连接")
+                try:
+                    await websocket.close(code=1013, reason="Too many connections")
+                except Exception:
+                    pass
+                return
         try:
             await websocket.accept()
-            self.active_connections.add(websocket)
-            # BUG-WS-11修复：记录连接活跃时间
-            self._connection_last_active[websocket] = time.time()
+            async with self._broadcast_lock:
+                self.active_connections.add(websocket)
+                # BUG-WS-11修复：记录连接活跃时间
+                self._connection_last_active[websocket] = time.time()
             logger.info(f"WebSocket客户端已连接，当前连接数: {len(self.active_connections)}")
         except Exception as e:
             logger.warning(f"WebSocket accept失败: {e}")
@@ -67,6 +73,7 @@ class WebSocketManager:
     def disconnect(self, websocket: WebSocket):
         """断开WebSocket连接
         BUG-WS-11修复：清理心跳记录
+        BUG-WS-LOCK-01修复：注意disconnect是同步方法，使用discard是线程安全的
         """
         self.active_connections.discard(websocket)
         # BUG-WS-11修复：清理心跳记录

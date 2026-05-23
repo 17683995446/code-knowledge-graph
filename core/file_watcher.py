@@ -94,13 +94,17 @@ class CodeFileHandler(FileSystemEventHandler):
         """
         处理文件移动事件
         BUG-FW-01/02 修复：同时处理源路径（删除）和目标路径（创建）
+        BUG-FW-03修复：添加异常保护，防止监控线程崩溃
         """
-        if event.is_directory:
-            return
-        # 源路径：视为删除
-        self._dispatch_event(event.src_path, "deleted")
-        # 目标路径：视为创建（新位置需要重新索引）
-        self._dispatch_event(event.dest_path, "created")
+        try:
+            if event.is_directory:
+                return
+            # 源路径：视为删除
+            self._dispatch_event(event.src_path, "deleted")
+            # 目标路径：视为创建（新位置需要重新索引）
+            self._dispatch_event(event.dest_path, "created")
+        except Exception as e:
+            logger.error(f"on_moved事件处理异常: {e}")
 
 
 class FileWatcher:

@@ -103,6 +103,8 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
 
     @app.on_event("shutdown")
     async def shutdown_event():
+        # BUG-WS-SHUTDOWN-01修复：停止心跳检测任务
+        await websocket_manager.stop_heartbeat_check()
         update_engine.stop()
         database.close()
 

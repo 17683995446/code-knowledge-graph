@@ -143,11 +143,13 @@ class SiliconFlowClient:
             logger.warning(f"硅基流动API连接错误: {e}，将重试")
             raise
         except json.JSONDecodeError as e:
+            # BUG-LLM-JSON-01修复：JSON解析错误应该抛出异常让外层重试机制处理
             logger.error(f"硅基流动API响应JSON解析错误: {e}")
-            return None
+            raise
         except Exception as exception:
+            # BUG-LLM-EXC-01修复：其他异常也应该抛出，让外层_chat_with_retry重试机制处理
             logger.error(f"硅基流动API请求失败: {exception}")
-            return None
+            raise
 
     def _parse_response(self, data: Dict[str, Any]) -> Optional[str]:
         """解析API响应

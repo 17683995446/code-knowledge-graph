@@ -126,16 +126,17 @@ class KnowledgeDatabase:
     def _check_and_recover_database(self):
         """
         BUG-DB-RECV-001修复：检测数据库完整性，损坏时自动备份并重建
+        BUG-DB-CONN-01修复：确保数据库连接在异常时正确关闭
         """
         if not os.path.exists(self.database_path):
             # 数据库不存在，无需检查
             return
         
         # 检查数据库完整性
+        conn = None
         try:
             conn = sqlite3.connect(self.database_path, timeout=5.0)
             result = conn.execute("PRAGMA integrity_check").fetchone()
-            conn.close()
             
             if result and result[0] == "ok":
                 # 数据库完整，无需恢复
@@ -150,11 +151,19 @@ class KnowledgeDatabase:
             self._backup_and_rebuild_database()
         except Exception as e:
             logger.error(f"数据库完整性检查失败: {e}")
+        finally:
+            # BUG-DB-CONN-01修复：确保连接被关闭
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def _backup_and_rebuild_database(self):
         """
         BUG-DB-RECV-001修复：备份损坏的数据库并重建
         BUG-DB-RECV-002修复：尝试从损坏数据库恢复数据，避免完全丢失
+        BUG-DB-CONN-02修复：确保恢复过程中的数据库连接正确关闭
         """
         try:
             # 生成备份文件名（带时间戳）
@@ -165,6 +174,8 @@ class KnowledgeDatabase:
             # BUG-DB-RECV-002修复：先尝试从损坏数据库恢复数据
             recovery_success = False
             if os.path.exists(self.database_path):
+                conn = None
+                recovery_conn = None
                 try:
                     # 尝试使用.dump命令导出数据
                     conn = sqlite3.connect(self.database_path, timeout=5.0)
@@ -181,13 +192,22 @@ class KnowledgeDatabase:
                             pass  # 忽略无法恢复的数据
                     
                     recovery_conn.commit()
-                    recovery_conn.close()
-                    conn.close()
-                    
                     logger.info(f"数据已恢复到: {recovery_db_path}")
                     recovery_success = True
                 except Exception as e:
                     logger.warning(f"数据恢复尝试失败: {e}")
+                finally:
+                    # BUG-DB-CONN-02修复：确保所有连接都被关闭
+                    if recovery_conn:
+                        try:
+                            recovery_conn.close()
+                        except Exception:
+                            pass
+                    if conn:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
             
             # 备份损坏的数据库文件
             if os.path.exists(self.database_path):
@@ -240,12 +260,25 @@ class KnowledgeDatabase:
         return self._get_connection()
 
     def compute_file_hash(self, file_path: str) -> bytes:
-        """计算文件的SHA256哈希值"""
+        """
+        计算文件的SHA256哈希值
+        BUG-DB-HASH-01修复：添加异常处理，防止文件访问错误导致程序崩溃
+        """
         hasher = hashlib.sha256()
-        with open(file_path, "rb") as file_handle:
-            for chunk in iter(lambda: file_handle.read(8192), b""):
-                hasher.update(chunk)
-        return hasher.digest()
+        try:
+            with open(file_path, "rb") as file_handle:
+                for chunk in iter(lambda: file_handle.read(8192), b""):
+                    hasher.update(chunk)
+            return hasher.digest()
+        except FileNotFoundError as e:
+            logger.error(f"文件不存在，无法计算哈希 {file_path}: {e}")
+            raise
+        except PermissionError as e:
+            logger.error(f"权限不足，无法读取文件 {file_path}: {e}")
+            raise
+        except (IOError, OSError) as e:
+            logger.error(f"IO错误，无法读取文件 {file_path}: {e}")
+            raise
 
     def upsert_file(self, file_path: str, language: str, file_hash: bytes) -> int:
         """插入或更新文件记录，返回文件ID（不commit，由调用者控制事务）

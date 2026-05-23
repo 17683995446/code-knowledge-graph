@@ -1,87 +1,87 @@
-[2026-05-22 11:36:48.%f] [INFO] [root:43] [setup_debug_logging] ================================================================================
-[2026-05-22 11:36:48.%f] [INFO] [root:44] [setup_debug_logging] 调试日志系统已启动
-[2026-05-22 11:36:48.%f] [INFO] [root:45] [setup_debug_logging] ================================================================================
-[2026-05-22 11:36:48.%f] [INFO] [__main__:353] [run_all_tests] ================================================================================
-[2026-05-22 11:36:48.%f] [INFO] [__main__:354] [run_all_tests] 开始全面测试
-[2026-05-22 11:36:48.%f] [INFO] [__main__:355] [run_all_tests] ================================================================================
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试环境设置
-[2026-05-22 11:36:48.%f] [INFO] [__main__:53] [setup] 测试环境: temp_dir=/tmp/code_knowledge_test_bq_ui50f, db=/tmp/code_knowledge_test_bq_ui50f/test.db
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试UTF-8编码
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_bq_ui50f/utf8_test.py
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 编码测试-UTF8: 发现 1 个类型, 1 个函数
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试GBK编码
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 gbk 读取文件: /tmp/code_knowledge_test_bq_ui50f/gbk_test.py
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 编码测试-GBK: 发现 1 个类型, 1 个函数
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试Latin-1编码
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 latin-1 读取文件: /tmp/code_knowledge_test_bq_ui50f/latin1_test.py
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 编码测试-Latin1: 发现 1 个类型, 1 个函数
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试空文件
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_bq_ui50f/empty.py
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 边界测试-空文件: 空文件解析正常
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试空白文件
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_bq_ui50f/whitespace.py
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 边界测试-空白文件: 空白文件解析正常
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试语法错误文件
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_bq_ui50f/syntax_error.py
-[2026-05-22 11:36:48.%f] [WARNING] [parsers.python_parser:136] [parse_file] Python语法错误 /tmp/code_knowledge_test_bq_ui50f/syntax_error.py: expected ':' (syntax_error.py, line 2)
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 边界测试-语法错误: 语法错误文件处理正常
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试超长文件
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_bq_ui50f/long_file.py
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 边界测试-超长文件: 发现 1000 个函数 (期望1000)
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试跨文件引用
-[2026-05-22 11:36:48.%f] [INFO] [parsers.parser_registry:83] [create_default_registry] 所有解析器加载成功: ['python', 'javascript', 'java', 'go']
-[2026-05-22 11:36:48.%f] [INFO] [core.update_engine:377] [full_sync] 开始全量同步: /tmp/code_knowledge_test_bq_ui50f
-[2026-05-22 11:36:48.%f] [DEBUG] [core.update_engine:407] [full_sync] 旧数据已备份到临时表
-[2026-05-22 11:36:48.%f] [INFO] [core.update_engine:479] [full_sync] 全量同步第一阶段: 提取9个文件的实体...
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_bq_ui50f/syntax_error.py
-[2026-05-22 11:36:48.%f] [WARNING] [parsers.python_parser:136] [parse_file] Python语法错误 /tmp/code_knowledge_test_bq_ui50f/syntax_error.py: expected ':' (syntax_error.py, line 2)
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_bq_ui50f/long_file.py
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_bq_ui50f/utf8_test.py
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 gbk 读取文件: /tmp/code_knowledge_test_bq_ui50f/gbk_test.py
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_bq_ui50f/module_b.py
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_bq_ui50f/module_a.py
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 latin-1 读取文件: /tmp/code_knowledge_test_bq_ui50f/latin1_test.py
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_bq_ui50f/empty.py
-[2026-05-22 11:36:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_bq_ui50f/whitespace.py
-[2026-05-22 11:36:48.%f] [DEBUG] [core.update_engine:699] [_save_checkpoint] 检查点已保存: 9/9 文件, 阶段2
-[2026-05-22 11:36:48.%f] [INFO] [core.update_engine:505] [full_sync] 全量同步第二阶段: 建立9个文件的引用关系...
-[2026-05-22 11:36:48.%f] [DEBUG] [core.update_engine:527] [full_sync] 备份表已清理
-[2026-05-22 11:36:48.%f] [DEBUG] [core.update_engine:729] [_clear_checkpoint] 检查点已清除
-[2026-05-22 11:36:48.%f] [INFO] [core.update_engine:536] [full_sync] 全量同步完成: 共9个文件, 成功9个
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 跨文件引用测试: 同步了 9 个文件
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试并发访问
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 并发测试: 成功 50/50, 错误: 0
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试事务回滚
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 事务回滚测试: 回滚后数据不存在
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试事务提交
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 事务提交测试: 提交后数据存在
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试JavaScript解析器
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] JS解析器测试: 发现 1 个类型, 2 个函数
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试Java解析器
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] Java解析器测试: 发现 1 个类型, 2 个函数
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试Go解析器
-[2026-05-22 11:36:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] Go解析器测试: 发现 1 个类型, 2 个函数
-[2026-05-22 11:36:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试环境清理
-[2026-05-22 11:36:48.%f] [DEBUG] [core.database:731] [close] WAL checkpoint已完成
-[2026-05-22 11:36:48.%f] [INFO] [__main__:63] [cleanup] 测试环境已清理
-[2026-05-22 11:36:48.%f] [INFO] [__main__:394] [print_report] ================================================================================
-[2026-05-22 11:36:48.%f] [INFO] [__main__:395] [print_report] 测试报告
-[2026-05-22 11:36:48.%f] [INFO] [__main__:396] [print_report] ================================================================================
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 编码测试-UTF8: 发现 1 个类型, 1 个函数
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 编码测试-GBK: 发现 1 个类型, 1 个函数
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 编码测试-Latin1: 发现 1 个类型, 1 个函数
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 边界测试-空文件: 空文件解析正常
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 边界测试-空白文件: 空白文件解析正常
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 边界测试-语法错误: 语法错误文件处理正常
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 边界测试-超长文件: 发现 1000 个函数 (期望1000)
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 跨文件引用测试: 同步了 9 个文件
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 并发测试: 成功 50/50, 错误: 0
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 事务回滚测试: 回滚后数据不存在
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 事务提交测试: 提交后数据存在
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] JS解析器测试: 发现 1 个类型, 2 个函数
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] Java解析器测试: 发现 1 个类型, 2 个函数
-[2026-05-22 11:36:48.%f] [INFO] [__main__:404] [print_report] [✓ PASS] Go解析器测试: 发现 1 个类型, 2 个函数
-[2026-05-22 11:36:48.%f] [INFO] [__main__:406] [print_report] --------------------------------------------------------------------------------
-[2026-05-22 11:36:48.%f] [INFO] [__main__:407] [print_report] 总计: 14 | 通过: 14 | 失败: 0
-[2026-05-22 11:36:48.%f] [INFO] [__main__:408] [print_report] 通过率: 100.0%
-[2026-05-22 11:36:48.%f] [INFO] [__main__:409] [print_report] ================================================================================
+[2026-05-23 00:27:48.%f] [INFO] [root:43] [setup_debug_logging] ================================================================================
+[2026-05-23 00:27:48.%f] [INFO] [root:44] [setup_debug_logging] 调试日志系统已启动
+[2026-05-23 00:27:48.%f] [INFO] [root:45] [setup_debug_logging] ================================================================================
+[2026-05-23 00:27:48.%f] [INFO] [__main__:353] [run_all_tests] ================================================================================
+[2026-05-23 00:27:48.%f] [INFO] [__main__:354] [run_all_tests] 开始全面测试
+[2026-05-23 00:27:48.%f] [INFO] [__main__:355] [run_all_tests] ================================================================================
+[2026-05-23 00:27:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试环境设置
+[2026-05-23 00:27:48.%f] [INFO] [__main__:53] [setup] 测试环境: temp_dir=/tmp/code_knowledge_test_0pq30yc_, db=/tmp/code_knowledge_test_0pq30yc_/test.db
+[2026-05-23 00:27:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试UTF-8编码
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_0pq30yc_/utf8_test.py
+[2026-05-23 00:27:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 编码测试-UTF8: 发现 1 个类型, 1 个函数
+[2026-05-23 00:27:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试GBK编码
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 gbk 读取文件: /tmp/code_knowledge_test_0pq30yc_/gbk_test.py
+[2026-05-23 00:27:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 编码测试-GBK: 发现 1 个类型, 1 个函数
+[2026-05-23 00:27:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试Latin-1编码
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 latin-1 读取文件: /tmp/code_knowledge_test_0pq30yc_/latin1_test.py
+[2026-05-23 00:27:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 编码测试-Latin1: 发现 1 个类型, 1 个函数
+[2026-05-23 00:27:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试空文件
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_0pq30yc_/empty.py
+[2026-05-23 00:27:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 边界测试-空文件: 空文件解析正常
+[2026-05-23 00:27:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试空白文件
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_0pq30yc_/whitespace.py
+[2026-05-23 00:27:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 边界测试-空白文件: 空白文件解析正常
+[2026-05-23 00:27:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试语法错误文件
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_0pq30yc_/syntax_error.py
+[2026-05-23 00:27:48.%f] [WARNING] [parsers.python_parser:136] [parse_file] Python语法错误 /tmp/code_knowledge_test_0pq30yc_/syntax_error.py: expected ':' (syntax_error.py, line 2)
+[2026-05-23 00:27:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 边界测试-语法错误: 语法错误文件处理正常
+[2026-05-23 00:27:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试超长文件
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_0pq30yc_/long_file.py
+[2026-05-23 00:27:48.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 边界测试-超长文件: 发现 1000 个函数 (期望1000)
+[2026-05-23 00:27:48.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试跨文件引用
+[2026-05-23 00:27:48.%f] [INFO] [parsers.parser_registry:83] [create_default_registry] 所有解析器加载成功: ['python', 'javascript', 'java', 'go']
+[2026-05-23 00:27:48.%f] [INFO] [core.update_engine:377] [full_sync] 开始全量同步: /tmp/code_knowledge_test_0pq30yc_
+[2026-05-23 00:27:48.%f] [DEBUG] [core.update_engine:407] [full_sync] 旧数据已备份到临时表
+[2026-05-23 00:27:48.%f] [INFO] [core.update_engine:479] [full_sync] 全量同步第一阶段: 提取9个文件的实体...
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_0pq30yc_/module_a.py
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 latin-1 读取文件: /tmp/code_knowledge_test_0pq30yc_/latin1_test.py
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_0pq30yc_/syntax_error.py
+[2026-05-23 00:27:48.%f] [WARNING] [parsers.python_parser:136] [parse_file] Python语法错误 /tmp/code_knowledge_test_0pq30yc_/syntax_error.py: expected ':' (syntax_error.py, line 2)
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_0pq30yc_/whitespace.py
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_0pq30yc_/utf8_test.py
+[2026-05-23 00:27:48.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_0pq30yc_/long_file.py
+[2026-05-23 00:27:49.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_0pq30yc_/empty.py
+[2026-05-23 00:27:49.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 utf-8 读取文件: /tmp/code_knowledge_test_0pq30yc_/module_b.py
+[2026-05-23 00:27:49.%f] [DEBUG] [parsers.python_parser:111] [parse_file] 成功使用编码 gbk 读取文件: /tmp/code_knowledge_test_0pq30yc_/gbk_test.py
+[2026-05-23 00:27:49.%f] [DEBUG] [core.update_engine:706] [_save_checkpoint] 检查点已保存: 9/9 文件, 阶段2
+[2026-05-23 00:27:49.%f] [INFO] [core.update_engine:505] [full_sync] 全量同步第二阶段: 建立9个文件的引用关系...
+[2026-05-23 00:27:49.%f] [DEBUG] [core.update_engine:527] [full_sync] 备份表已清理
+[2026-05-23 00:27:49.%f] [DEBUG] [core.update_engine:736] [_clear_checkpoint] 检查点已清除
+[2026-05-23 00:27:49.%f] [INFO] [core.update_engine:538] [full_sync] 全量同步完成: 共9个文件, 成功9个
+[2026-05-23 00:27:49.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 跨文件引用测试: 同步了 9 个文件
+[2026-05-23 00:27:49.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试并发访问
+[2026-05-23 00:27:49.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 并发测试: 成功 50/50, 错误: 0
+[2026-05-23 00:27:49.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试事务回滚
+[2026-05-23 00:27:49.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 事务回滚测试: 回滚后数据不存在
+[2026-05-23 00:27:49.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试事务提交
+[2026-05-23 00:27:49.%f] [INFO] [__main__:73] [record_result] [✓ PASS] 事务提交测试: 提交后数据存在
+[2026-05-23 00:27:49.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试JavaScript解析器
+[2026-05-23 00:27:49.%f] [INFO] [__main__:73] [record_result] [✓ PASS] JS解析器测试: 发现 1 个类型, 2 个函数
+[2026-05-23 00:27:49.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试Java解析器
+[2026-05-23 00:27:49.%f] [INFO] [__main__:73] [record_result] [✓ PASS] Java解析器测试: 发现 1 个类型, 2 个函数
+[2026-05-23 00:27:49.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试Go解析器
+[2026-05-23 00:27:49.%f] [INFO] [__main__:73] [record_result] [✓ PASS] Go解析器测试: 发现 1 个类型, 2 个函数
+[2026-05-23 00:27:49.%f] [INFO] [__main__:146] [log_checkpoint] [CHECKPOINT] 测试环境清理
+[2026-05-23 00:27:49.%f] [DEBUG] [core.database:764] [close] WAL checkpoint已完成
+[2026-05-23 00:27:49.%f] [INFO] [__main__:63] [cleanup] 测试环境已清理
+[2026-05-23 00:27:49.%f] [INFO] [__main__:394] [print_report] ================================================================================
+[2026-05-23 00:27:49.%f] [INFO] [__main__:395] [print_report] 测试报告
+[2026-05-23 00:27:49.%f] [INFO] [__main__:396] [print_report] ================================================================================
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 编码测试-UTF8: 发现 1 个类型, 1 个函数
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 编码测试-GBK: 发现 1 个类型, 1 个函数
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 编码测试-Latin1: 发现 1 个类型, 1 个函数
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 边界测试-空文件: 空文件解析正常
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 边界测试-空白文件: 空白文件解析正常
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 边界测试-语法错误: 语法错误文件处理正常
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 边界测试-超长文件: 发现 1000 个函数 (期望1000)
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 跨文件引用测试: 同步了 9 个文件
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 并发测试: 成功 50/50, 错误: 0
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 事务回滚测试: 回滚后数据不存在
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] 事务提交测试: 提交后数据存在
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] JS解析器测试: 发现 1 个类型, 2 个函数
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] Java解析器测试: 发现 1 个类型, 2 个函数
+[2026-05-23 00:27:49.%f] [INFO] [__main__:404] [print_report] [✓ PASS] Go解析器测试: 发现 1 个类型, 2 个函数
+[2026-05-23 00:27:49.%f] [INFO] [__main__:406] [print_report] --------------------------------------------------------------------------------
+[2026-05-23 00:27:49.%f] [INFO] [__main__:407] [print_report] 总计: 14 | 通过: 14 | 失败: 0
+[2026-05-23 00:27:49.%f] [INFO] [__main__:408] [print_report] 通过率: 100.0%
+[2026-05-23 00:27:49.%f] [INFO] [__main__:409] [print_report] ================================================================================
