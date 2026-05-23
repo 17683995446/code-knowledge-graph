@@ -18,6 +18,20 @@ class JavaParser(BaseParser):
     基于正则表达式，支持class/interface/enum/method/import
     """
 
+    # BUG-JAVA-REGEX-01修复：将正则表达式编译为类变量，避免重复编译
+    IMPORT_PATTERN = re.compile(r'import\s+(?:static\s+)?([\w.]+)(\.\*)?;')
+    TYPE_PATTERN = re.compile(
+        r'(?:public|private|protected)?\s*(?:abstract|final|static)?\s*'
+        r'(class|interface|enum)\s+(\w+)'
+        r'(?:\s+extends\s+(\w+))?'
+        r'(?:\s+implements\s+([\w,\s]+))?'
+    )
+    METHOD_PATTERN = re.compile(
+        r'^\s*(?:public|private|protected)?\s*(?:static|final|abstract|synchronized|native)?\s*'
+        r'(?:[\w<>\[\],\s]{1,60})\s+(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*(?:\{?|$)'
+    )
+    CALL_PATTERN = re.compile(r'(\w+)\s*\(')
+
     @property
     def language(self) -> str:
         return "java"
@@ -77,10 +91,10 @@ class JavaParser(BaseParser):
     def _extract_imports(self, lines: List[str], result: ParseResult):
         """提取import语句
         BUG-JAVA-WILDCARD-01修复：跳过通配符导入(.*)
+        BUG-JAVA-REGEX-01修复：使用类变量中的预编译正则
         """
-        pattern = re.compile(r'import\s+(?:static\s+)?([\w.]+)(\.\*)?;')
         for line in lines:
-            match = pattern.search(line)
+            match = self.IMPORT_PATTERN.search(line)
             if match:
                 # BUG-JAVA-WILDCARD-01修复：跳过通配符导入
                 if match.group(2):  # 检测到.*
@@ -99,13 +113,8 @@ class JavaParser(BaseParser):
     def _extract_types(self, lines: List[str], result: ParseResult):
         """提取类型定义（class/interface/enum）
         BUG-STR-LIT-01修复：跳过字符串和注释中的内容
+        BUG-JAVA-REGEX-01修复：使用类变量中的预编译正则
         """
-        type_pattern = re.compile(
-            r'(?:public|private|protected)?\s*(?:abstract|final|static)?\s*'
-            r'(class|interface|enum)\s+(\w+)'
-            r'(?:\s+extends\s+(\w+))?'
-            r'(?:\s+implements\s+([\w,\s]+))?'
-        )
         for line_num, line in enumerate(lines, 1):
             stripped = line.strip()
             # 跳过注释和字符串行
@@ -115,7 +124,7 @@ class JavaParser(BaseParser):
             if stripped.startswith('"') or stripped.startswith("'"):
                 continue
 
-            match = type_pattern.search(line)
+            match = self.TYPE_PATTERN.search(line)
             if match:
                 # BUG-STR-LIT-01: 检查匹配是否在字符串字面量内
                 if self._is_inside_string(line, match.start()):
@@ -150,13 +159,8 @@ class JavaParser(BaseParser):
         BUG-FUNC-DUP-02修复：使用compute_end_line正确计算范围
         BUG-STR-LIT-01修复：跳过字符串和注释，检查匹配是否在引号内
         BUG-JAVA-03修复：放宽方法匹配正则，支持方法体在下一行
+        BUG-JAVA-REGEX-01修复：使用类变量中的预编译正则
         """
-        # BUG-JAVA-03修复：放宽正则，不要求行尾有{
-        # BUG-JAVA-METHOD-01修复：限制返回类型匹配长度，避免匹配字段声明
-        method_pattern = re.compile(
-            r'^\s*(?:public|private|protected)?\s*(?:static|final|abstract|synchronized|native)?\s*'
-            r'(?:[\w<>\[\],\s]{1,60})\s+(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*(?:\{?|$)'
-        )
         current_class = ""
         for line_num, line in enumerate(lines, 1):
             stripped = line.strip()
@@ -167,7 +171,7 @@ class JavaParser(BaseParser):
             if class_match:
                 current_class = class_match.group(1)
 
-            method_match = method_pattern.search(line)
+            method_match = self.METHOD_PATTERN.search(line)
             if method_match:
                 method_name = method_match.group(1)
                 skip_words = {
@@ -215,10 +219,10 @@ class JavaParser(BaseParser):
     def _extract_calls(self, source_code: str, result: ParseResult):
         """提取方法调用关系
         BUG-JP-01修复：只在方法体范围内查找调用
+        BUG-JAVA-REGEX-01修复：使用类变量中的预编译正则
         """
         lines = source_code.split('\n')
         func_names = {f.name for f in result.functions}
-        call_pattern = re.compile(r'(\w+)\s*\(')
         skip_words = {
             "if", "for", "while", "switch", "catch", "return", "new",
             "class", "interface", "enum", "import", "package", "super",
@@ -236,7 +240,7 @@ class JavaParser(BaseParser):
             if end <= start:
                 end = start + 100
             search_text = '\n'.join(lines[max(0, start - 1):min(len(lines), end)])
-            matches = call_pattern.findall(search_text)
+            matches = self.CALL_PATTERN.findall(search_text)
             for callee in matches:
                 if callee in func_names and callee != caller and callee not in skip_words:
                     call_set.add((caller, callee))

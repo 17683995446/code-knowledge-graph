@@ -43,6 +43,24 @@ class SiliconFlowClient:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
+        # BUG-LLM-CONN-01修复：初始化时创建HTTP客户端，复用连接池
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """BUG-LLM-CONN-01修复：获取或创建HTTP客户端"""
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                headers=self.headers,
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)
+            )
+        return self._client
+
+    async def close(self):
+        """BUG-LLM-CONN-01修复：关闭HTTP客户端"""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
 
     async def analyze_code_structure(self, stats: Dict[str, Any],
                                      graph_summary: Dict[str, Any]) -> Optional[str]:
@@ -110,13 +128,12 @@ class SiliconFlowClient:
             "temperature": 0.3
         }
         try:
-            # BUG-LLM-02修复：使用实例配置的超时时间
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    self.API_BASE_URL,
-                    headers=self.headers,
-                    json=payload
-                )
+            # BUG-LLM-CONN-01修复：使用复用的HTTP客户端
+            client = await self._get_client()
+            response = await client.post(
+                self.API_BASE_URL,
+                json=payload
+            )
                 if response.status_code == 200:
                     data = response.json()
                     # BUG-LLM-03修复：更完整的响应解析
