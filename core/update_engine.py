@@ -18,6 +18,8 @@ import logging
 import threading
 import queue
 import json
+import time
+import gc
 from queue import Queue, Full
 from typing import Dict, Set, Optional, Callable, Any
 from datetime import datetime
@@ -25,6 +27,7 @@ from datetime import datetime
 from core.database import KnowledgeDatabase
 from core.file_watcher import FileWatcher
 from parsers.parser_registry import ParserRegistry
+from parsers.base_parser import ReferenceInfo
 
 logger = logging.getLogger(__name__)
 
@@ -276,42 +279,38 @@ class UpdateEngine:
 
             # BUG-DB-TRANSACTION-01修复：使用SAVEPOINT确保删除+插入的原子性
             # BUG-DB-TIMEOUT-03修复：添加重试机制应对SQLite并发写锁冲突
+            # BUG-R21-CORE-003修复：将_write_lock提升到SAVEPOINT外层，避免锁在事务期间被释放
             conn = self.database._get_connection()
             max_retries = 10
             for attempt in range(max_retries):
                 try:
-                    # 创建SAVEPOINT，保护后续操作
-                    conn.execute("SAVEPOINT file_update")
-                    
-                    file_record = self.database.get_file_by_path(file_path)
-                    if file_record:
-                        self.database.delete_file_cascade(file_record.file_id)
-
-                    file_id = self.database.upsert_file(file_path, language, file_hash)
-
-                    if parse_result:
-                        self._store_parse_result(file_id, parse_result)
-
-                    # 释放SAVEPOINT（确认操作）
-                    conn.execute("RELEASE SAVEPOINT file_update")
-                    self.database.commit()
-                    break  # 成功，退出重试循环
+                    with self.database._write_lock:
+                        conn.execute("SAVEPOINT file_update")
+                        file_record = self.database.get_file_by_path(file_path)
+                        if file_record:
+                            self.database.delete_file_cascade(file_record.file_id)
+                        file_id = self.database.upsert_file(file_path, language, file_hash)
+                        if parse_result:
+                            self._store_parse_result(file_id, parse_result)
+                        conn.execute("RELEASE SAVEPOINT file_update")
+                        self.database.commit()
+                    break
                 except Exception as e:
-                    # BUG-DB-TIMEOUT-03修复：数据库锁冲突时重试
                     try:
                         conn.execute("ROLLBACK TO SAVEPOINT file_update")
                     except Exception:
                         pass
                     self.database.rollback()
                     if "database is locked" in str(e) and attempt < max_retries - 1:
-                        import time as _time
-                        _time.sleep(0.05 * (attempt + 1))
+                        time.sleep(0.05 * (attempt + 1))
                         continue
                     logger.error(f"更新文件失败，已回滚: {file_path}: {e}")
                     raise
 
-    def _store_parse_result(self, file_id: int, parse_result, language: str = ""):
-        """将解析结果存储到数据库（不commit，由调用者控制事务）"""
+    def _store_parse_result(self, file_id: int, parse_result):
+        """将解析结果存储到数据库（不commit，由调用者控制事务）
+        BUG-R21-CORE-010修复：删除未使用的language参数
+        """
         type_id_map = {}
 
         if parse_result.types:
@@ -495,79 +494,80 @@ class UpdateEngine:
         else:
             files_to_process = all_files
 
-        # 第一阶段：提取所有实体（不建立跨文件引用）
-        logger.info(f"全量同步第一阶段: 提取{len(files_to_process)}个文件的实体...")
-        file_ids_list = []
-        processed_files = list(already_processed)  # BUG-UE-RECV-004: 从已处理文件开始
-        
-        for i, file_path in enumerate(files_to_process):
-            try:
-                file_id, parse_result = self._update_single_file_phase1(file_path)
-                if file_id:
-                    file_ids_list.append(file_id)
-                    updated_files += 1
-                    processed_files.append(file_path)
-                    
-                    # BUG-AUDIT-022修复：将原始references保存到临时表，供第二阶段使用
-                    if parse_result and parse_result.references:
-                        self._save_raw_references(file_id, parse_result.references)
-                    
-                    # BUG-UE-RECV-004: 每100个文件保存一次检查点
-                    if (i + 1) % 100 == 0:
-                        self._save_checkpoint(processed_files, len(files_to_process), phase=1)
-                        
-            except Exception as exception:
-                logger.error(f"全量同步失败 {file_path}: {exception}")
-
-        # BUG-UE-RECV-004: 第一阶段完成，保存检查点
-        self._save_checkpoint(processed_files, len(files_to_process), phase=2)
-
-        # 第二阶段：建立跨文件引用关系
-        # BUG-AUDIT-022修复：从临时表_sync_raw_references读取原始references数据
-        # 此时所有文件的实体（types/functions）已全部入库，可以正确解析跨文件引用
-        logger.info(f"全量同步第二阶段: 建立{updated_files}个文件的引用关系...")
-        BATCH_SIZE = 1000
-        phase2_errors = 0
-        for batch_start in range(0, len(file_ids_list), BATCH_SIZE):
-            batch_file_ids = file_ids_list[batch_start:batch_start + BATCH_SIZE]
-            for file_id in batch_file_ids:
-                try:
-                    # BUG-AUDIT-022修复：从临时表读取原始references，而非空的code_references表
-                    raw_refs = self._load_raw_references(file_id)
-                    if raw_refs:
-                        self._store_references_only(file_id, raw_refs)
-                except Exception as exception:
-                    logger.error(f"引用关系建立失败 file_id={file_id}: {exception}")
-                    phase2_errors += 1
-            import gc
-            gc.collect()
-
-        # BUG-AUDIT-026修复：如果第二阶段有失败，不清除检查点，允许下次恢复
-        if phase2_errors > 0:
-            logger.warning(f"第二阶段有 {phase2_errors} 个文件失败，保留检查点以便恢复")
-            # 更新检查点状态为需要重新执行第二阶段
-            self._save_checkpoint(processed_files, len(files_to_process), phase=2)
-        else:
-            # BUG-UE-RECV-004: 同步完成，清除检查点
-            self._clear_checkpoint()
-
-        # BUG-UE-004修复：同步成功后删除备份表和临时引用表
+        # BUG-R21-CORE-002修复：将第一阶段+第二阶段逻辑包裹在try/finally中，确保异常时也清理临时表
         try:
-            for table in ["_backup_files", "_backup_types", "_backup_functions",
-                          "_backup_calls", "_backup_code_references",
-                          "_sync_raw_references"]:
-                conn.execute(f"DROP TABLE IF EXISTS {table}")
-            conn.commit()
-            logger.debug("备份表和临时引用表已清理")
-        except Exception as e:
-            logger.warning(f"清理备份表失败: {e}")
+            # 第一阶段：提取所有实体（不建立跨文件引用）
+            logger.info(f"全量同步第一阶段: 提取{len(files_to_process)}个文件的实体...")
+            file_ids_list = []
+            processed_files = list(already_processed)  # BUG-UE-RECV-004: 从已处理文件开始
 
-        # BUG-UE-STATS-01修复：使用_stats_lock保护stats的读写操作
-        with self._stats_lock:
-            self.stats["total_updates"] += 1
-            self.stats["last_update_time"] = datetime.now().isoformat()
-        logger.info(f"全量同步完成: 共{total_files}个文件, 成功{updated_files}个")
-        return {"total": total_files, "updated": updated_files}
+            for i, file_path in enumerate(files_to_process):
+                try:
+                    file_id, parse_result = self._update_single_file_phase1(file_path)
+                    if file_id:
+                        file_ids_list.append(file_id)
+                        updated_files += 1
+                        processed_files.append(file_path)
+
+                        # BUG-AUDIT-022修复：将原始references保存到临时表，供第二阶段使用
+                        if parse_result and parse_result.references:
+                            self._save_raw_references(file_id, parse_result.references)
+
+                        # BUG-UE-RECV-004: 每100个文件保存一次检查点
+                        if (i + 1) % 100 == 0:
+                            self._save_checkpoint(processed_files, len(files_to_process), phase=1)
+
+                except Exception as exception:
+                    logger.error(f"全量同步失败 {file_path}: {exception}")
+
+            # BUG-UE-RECV-004: 第一阶段完成，保存检查点
+            self._save_checkpoint(processed_files, len(files_to_process), phase=2)
+
+            # 第二阶段：建立跨文件引用关系
+            # BUG-AUDIT-022修复：从临时表_sync_raw_references读取原始references数据
+            # 此时所有文件的实体（types/functions）已全部入库，可以正确解析跨文件引用
+            logger.info(f"全量同步第二阶段: 建立{updated_files}个文件的引用关系...")
+            BATCH_SIZE = 1000
+            phase2_errors = 0
+            for batch_start in range(0, len(file_ids_list), BATCH_SIZE):
+                batch_file_ids = file_ids_list[batch_start:batch_start + BATCH_SIZE]
+                for file_id in batch_file_ids:
+                    try:
+                        # BUG-AUDIT-022修复：从临时表读取原始references，而非空的code_references表
+                        raw_refs = self._load_raw_references(file_id)
+                        if raw_refs:
+                            self._store_references_only(file_id, raw_refs)
+                    except Exception as exception:
+                        logger.error(f"引用关系建立失败 file_id={file_id}: {exception}")
+                        phase2_errors += 1
+                gc.collect()
+
+            # BUG-AUDIT-026修复：如果第二阶段有失败，不清除检查点，允许下次恢复
+            if phase2_errors > 0:
+                logger.warning(f"第二阶段有 {phase2_errors} 个文件失败，保留检查点以便恢复")
+                # 更新检查点状态为需要重新执行第二阶段
+                self._save_checkpoint(processed_files, len(files_to_process), phase=2)
+            else:
+                # BUG-UE-RECV-004: 同步完成，清除检查点
+                self._clear_checkpoint()
+
+            # BUG-UE-STATS-01修复：使用_stats_lock保护stats的读写操作
+            with self._stats_lock:
+                self.stats["total_updates"] += 1
+                self.stats["last_update_time"] = datetime.now().isoformat()
+            logger.info(f"全量同步完成: 共{total_files}个文件, 成功{updated_files}个")
+            return {"total": total_files, "updated": updated_files}
+        finally:
+            # BUG-R21-CORE-002修复：无论成功还是异常，都清理备份表和临时引用表
+            try:
+                for table in ["_backup_files", "_backup_types", "_backup_functions",
+                              "_backup_calls", "_backup_code_references",
+                              "_sync_raw_references"]:
+                    conn.execute(f"DROP TABLE IF EXISTS {table}")
+                conn.commit()
+                logger.debug("备份表和临时引用表已清理")
+            except Exception as e:
+                logger.warning(f"清理备份表失败: {e}")
 
     def _update_single_file_phase1(self, file_path: str, event_type: str = "created"):
         """全量同步第一阶段：只提取实体，不建立跨文件引用"""
@@ -745,8 +745,6 @@ class UpdateEngine:
 
     def _load_raw_references(self, file_id: int):
         """BUG-AUDIT-022修复：从临时表加载原始references数据"""
-        from parsers.base_parser import ReferenceInfo
-        
         conn = self.database._get_connection()
         references = []
         for row in conn.execute(
@@ -818,24 +816,31 @@ class UpdateEngine:
         except Exception as e:
             logger.warning(f"清除检查点失败: {e}")
 
-    def _can_resume_from_checkpoint(self, checkpoint: Optional[Dict[str, Any]], 
+    def _can_resume_from_checkpoint(self, checkpoint: Optional[Dict[str, Any]],
                                      all_files: list) -> tuple:
         """
         BUG-UE-RECV-004修复：检查是否可以从检查点恢复
+        BUG-R21-CORE-001修复：phase=2且无待处理文件时，直接进入第二阶段
         Returns:
             (can_resume, files_to_process, processed_files)
         """
         if not checkpoint:
             return False, all_files, []
-        
+
         processed_files = set(checkpoint.get("processed_files", []))
         # 过滤出未处理的文件
         files_to_process = [f for f in all_files if f not in processed_files]
-        
+        phase = checkpoint.get("phase", 1)
+
         if files_to_process:
             logger.info(f"从检查点恢复: 跳过{len(processed_files)}个已处理文件，继续处理{len(files_to_process)}个文件")
             return True, files_to_process, list(processed_files)
-        
+
+        # BUG-R21-CORE-001修复：phase=2且无待处理文件时，直接进入第二阶段
+        if phase == 2 and processed_files:
+            logger.info(f"从检查点恢复: 第一阶段已完成({len(processed_files)}个文件)，直接进入第二阶段")
+            return True, [], list(processed_files)
+
         return False, all_files, []
 
     def has_pending_checkpoint(self) -> bool:

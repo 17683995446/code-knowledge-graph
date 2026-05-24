@@ -101,7 +101,6 @@ class KnowledgeDatabase:
     def __init__(self, database_path: str = "code_knowledge.db"):
         self.database_path = database_path
         self._local = threading.local()
-        self._lock = threading.Lock()
         self._write_lock = threading.RLock()  # BUG-DB-CONC-001修复: 使用RLock避免死锁
         # BUG-DB-002修复：维护所有线程连接的列表
         self._all_connections: List[sqlite3.Connection] = []
@@ -145,7 +144,10 @@ class KnowledgeDatabase:
         # 检查数据库完整性
         conn = None
         try:
-            conn = sqlite3.connect(self.database_path, timeout=5.0)
+            conn = sqlite3.connect(self.database_path, timeout=60.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=60000")
             result = conn.execute("PRAGMA integrity_check").fetchone()
             
             if result and result[0] == "ok":
@@ -275,6 +277,7 @@ class KnowledgeDatabase:
         """
         计算文件的SHA256哈希值
         BUG-DB-HASH-01修复：添加异常处理，防止文件访问错误导致程序崩溃
+        BUG-R21-CORE-008修复：合并冗余异常处理为单个except OSError
         """
         hasher = hashlib.sha256()
         try:
@@ -282,14 +285,8 @@ class KnowledgeDatabase:
                 for chunk in iter(lambda: file_handle.read(8192), b""):
                     hasher.update(chunk)
             return hasher.digest()
-        except FileNotFoundError as e:
-            logger.error(f"文件不存在，无法计算哈希 {file_path}: {e}")
-            raise
-        except PermissionError as e:
-            logger.error(f"权限不足，无法读取文件 {file_path}: {e}")
-            raise
-        except (IOError, OSError) as e:
-            logger.error(f"IO错误，无法读取文件 {file_path}: {e}")
+        except OSError as e:
+            logger.error(f"无法读取文件，计算哈希失败 {file_path}: {e}")
             raise
 
     def upsert_file(self, file_path: str, language: str, file_hash: bytes) -> int:
@@ -486,29 +483,9 @@ class KnowledgeDatabase:
                 from_id = entity_id_map.get(from_entity)
                 to_id = entity_id_map.get(to_entity)
 
-                # __imports__ 引用：表示当前文件导入了 to_entity
-                # 只将当前文件的types（类/接口）作为 from_id，不关联functions
-                # BUG-DB-FILEID-01修复：使用is not None检查，避免0被误判
-                if from_entity == "__imports__" and current_file_id is not None and current_file_id > 0:
-                    to_id = self._find_entity_id(conn, to_entity)
-                    if to_id:
-                        for row in conn.execute(
-                            "SELECT id FROM types WHERE file_id = ? AND kind != 'module'",
-                            (current_file_id,)
-                        ).fetchall():
-                            fid = row["id"]
-                            if fid != to_id:
-                                try:
-                                    conn.execute(
-                                        "INSERT OR IGNORE INTO code_references (from_id, to_id, kind) VALUES (?, ?, ?)",
-                                        (fid, to_id, ref_info["kind"])
-                                    )
-                                except sqlite3.IntegrityError:
-                                    pass
-                    continue
-
-                # __module__ 引用：类似处理，只关联types
-                if from_entity == "__module__" and current_file_id is not None and current_file_id > 0:
+                # BUG-R21-CORE-007修复：合并__imports__和__module__的重复处理逻辑
+                # __imports__ 和 __module__ 引用：表示当前文件导入了 to_entity
+                if from_entity in ("__imports__", "__module__") and current_file_id is not None and current_file_id > 0:
                     to_id = self._find_entity_id(conn, to_entity)
                     if to_id:
                         for row in conn.execute(
@@ -739,29 +716,22 @@ class KnowledgeDatabase:
             limit = 50000
             
         conn = self._get_connection()
-        # BUG-AUDIT-027修复：使用子查询统一实体来源（types+functions），避免四路UNION ALL
-        # 原来的四路UNION ALL在数据量大时极慢（O(n^2)级别JOIN），现在通过子查询将
-        # types和functions合并为统一实体视图，只需一次JOIN即可获取所有跨文件引用
+        # BUG-R21-CORE-006修复：使用CTE替代重复的UNION ALL子查询，提升查询性能
         file_deps = conn.execute("""
+            WITH entities AS (
+                SELECT t.id as entity_id, f.path as file_path
+                FROM types t JOIN files f ON t.file_id = f.id
+                UNION ALL
+                SELECT fn.id as entity_id, f.path as file_path
+                FROM functions fn JOIN files f ON fn.file_id = f.id
+            )
             SELECT
                 e_from.file_path as from_file,
                 e_to.file_path as to_file,
                 r.kind
             FROM code_references r
-            JOIN (
-                SELECT t.id as entity_id, f.path as file_path
-                FROM types t JOIN files f ON t.file_id = f.id
-                UNION ALL
-                SELECT fn.id as entity_id, f.path as file_path
-                FROM functions fn JOIN files f ON fn.file_id = f.id
-            ) e_from ON r.from_id = e_from.entity_id
-            JOIN (
-                SELECT t.id as entity_id, f.path as file_path
-                FROM types t JOIN files f ON t.file_id = f.id
-                UNION ALL
-                SELECT fn.id as entity_id, f.path as file_path
-                FROM functions fn JOIN files f ON fn.file_id = f.id
-            ) e_to ON r.to_id = e_to.entity_id
+            JOIN entities e_from ON r.from_id = e_from.entity_id
+            JOIN entities e_to ON r.to_id = e_to.entity_id
             WHERE e_from.file_path != e_to.file_path
             LIMIT ?
         """, (limit,)).fetchall()

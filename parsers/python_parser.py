@@ -100,31 +100,11 @@ class PythonParser(BaseParser):
         if not self.check_file_size(file_path):
             return result
         
-        source_code = None
-
-        # BUG-PY-01修复：尝试多种编码
-        encodings = ["utf-8", "gbk", "gb2312", "latin-1", "cp1252"]
-        for encoding in encodings:
-            try:
-                with open(file_path, "r", encoding=encoding) as fh:
-                    source_code = fh.read()
-                logger.debug(f"成功使用编码 {encoding} 读取文件: {file_path}")
-                break
-            except UnicodeDecodeError:
-                continue
-            except Exception as e:
-                logger.warning(f"读取文件失败 {file_path} 使用编码 {encoding}: {e}")
-                continue
-
-        # 如果所有编码都失败，使用errors='ignore'作为最后手段
+        # BUG-R21-PARSER-005修复：使用BaseParser公共方法读取文件内容
+        source_code = self._read_file_content(file_path)
         if source_code is None:
-            try:
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
-                    source_code = fh.read()
-                logger.warning(f"使用errors='ignore'读取文件: {file_path}")
-            except Exception as e:
-                logger.error(f"无法读取文件 {file_path}: {e}")
-                return result
+            logger.error(f"无法读取文件 {file_path}")
+            return result
 
         try:
             if not source_code.strip():
@@ -259,16 +239,22 @@ class PythonParser(BaseParser):
     def _extract_calls(self, node: ast.AST, caller_name: str, result: ParseResult):
         """提取函数调用关系
         BUG-CALL-NOISE-01修复：过滤内置函数/方法调用噪音
+        BUG-R21-PARSER-001修复：只遍历直接子节点，避免嵌套函数调用被重复归属
         """
-        for child in ast.walk(node):
-            if isinstance(child, ast.Call):
-                callee_name = self._get_call_name(child)
-                if (callee_name and callee_name != caller_name
-                        and callee_name not in self.PYTHON_BUILTINS):
-                    result.calls.append(CallInfo(
-                        caller=caller_name,
-                        callee=callee_name
-                    ))
+        for child in ast.iter_child_nodes(node):
+            # 跳过嵌套函数和类定义，它们的调用关系由递归_visit_tree处理
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            # 对非定义节点，递归遍历其子树中的Call节点
+            for descendant in ast.walk(child):
+                if isinstance(descendant, ast.Call):
+                    callee_name = self._get_call_name(descendant)
+                    if (callee_name and callee_name != caller_name
+                            and callee_name not in self.PYTHON_BUILTINS):
+                        result.calls.append(CallInfo(
+                            caller=caller_name,
+                            callee=callee_name
+                        ))
 
     def _get_call_name(self, call_node: ast.Call) -> Optional[str]:
         """获取调用函数名

@@ -45,15 +45,21 @@ class SiliconFlowClient:
         }
         # BUG-LLM-CONN-01修复：初始化时创建HTTP客户端，复用连接池
         self._client: Optional[httpx.AsyncClient] = None
+        # BUG-R21-PARSER-003修复：添加asyncio.Lock保护客户端创建
+        self._client_lock = asyncio.Lock()
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """BUG-LLM-CONN-01修复：获取或创建HTTP客户端"""
+        """BUG-LLM-CONN-01修复：获取或创建HTTP客户端
+        BUG-R21-PARSER-003修复：使用asyncio.Lock双重检查保护并发创建
+        """
         if self._client is None:
-            self._client = httpx.AsyncClient(
-                timeout=self.timeout,
-                headers=self.headers,
-                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)
-            )
+            async with self._client_lock:
+                if self._client is None:  # 双重检查
+                    self._client = httpx.AsyncClient(
+                        timeout=self.timeout,
+                        headers=self.headers,
+                        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)
+                    )
         return self._client
 
     async def close(self):
@@ -97,6 +103,17 @@ class SiliconFlowClient:
                     raise
                 wait_time = e.retry_after if e.retry_after else (2 ** attempt) + random.uniform(0, 1)
                 logger.warning(f"API限流，等待 {wait_time:.1f} 秒后重试 (尝试 {attempt + 1}/{max_retries})")
+                await asyncio.sleep(wait_time)
+            except httpx.HTTPStatusError as e:
+                # BUG-R21-PARSER-004修复：区分可重试和不可重试错误
+                status_code = e.response.status_code
+                if status_code in (400, 401, 403):
+                    logger.error(f"LLM请求不可恢复错误 (HTTP {status_code}): {e}")
+                    raise  # 不重试
+                logger.warning(f"LLM请求失败 (HTTP {status_code}), 重试中...")
+                if attempt == max_retries - 1:
+                    raise
+                wait_time = (2 ** attempt) + random.uniform(0, 1)
                 await asyncio.sleep(wait_time)
             except Exception as e:
                 if attempt == max_retries - 1:

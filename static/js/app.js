@@ -664,11 +664,13 @@ function renderDependencyGraph() {
         const from = nodePositions[edge.source];
         const to = nodePositions[edge.target];
         if (from && to) {
-            const color = edgeColors[edge.kind] || '#3b82f6';
-            const marker = edge.kind === 'inherit' ? 'arrowhead-inherit' :
-                          edge.kind === 'import' ? 'arrowhead-import' : 'arrowhead';
+            // BUG-R21-WEB-003修复：对来自后端的数据进行XML转义
+            const safeKind = escapeXml(edge.kind || '');
+            const color = edgeColors[safeKind] || '#3b82f6';
+            const marker = safeKind === 'inherit' ? 'arrowhead-inherit' :
+                          safeKind === 'import' ? 'arrowhead-import' : 'arrowhead';
             svgContent += `<line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}"
-                stroke="${color}" stroke-width="1.5" stroke-opacity="0.5" marker-end="url(#${marker})" />`;
+                stroke="${escapeXml(color)}" stroke-width="1.5" stroke-opacity="0.5" marker-end="url(#${escapeXml(marker)})" />`;
         }
     });
 
@@ -870,5 +872,6 @@ function escapeHtml(text) {
 }
 
 function escapeXml(text) {
-    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    // BUG-R21-WEB-003修复：添加单引号转义，确保XML属性安全
+    return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }

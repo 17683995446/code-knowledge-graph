@@ -13,6 +13,7 @@ import signal
 import click
 import logging
 import asyncio
+import threading
 import platform
 from pathlib import Path
 
@@ -105,7 +106,8 @@ def main(project_path: str, port: int, host: str, db: str, api_key: str, verbose
 
     # BUG-MAIN-01修复: 注册信号处理器
     global _shutdown_event
-    _shutdown_event = asyncio.Event()
+    # BUG-R21-WEB-006修复：使用threading.Event替代asyncio.Event，因为signal_handler在主线程中调用
+    _shutdown_event = threading.Event()
     
     signal.signal(signal.SIGINT, signal_handler)
     # BUG-MAIN-04修复: Windows平台SIGTERM不可用，使用SIGBREAK或跳过

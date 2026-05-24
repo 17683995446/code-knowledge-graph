@@ -111,6 +111,30 @@ class BaseParser(ABC):
             return False
 
     @staticmethod
+    def _read_file_content(file_path: str) -> Optional[str]:
+        """读取文件内容，自动检测编码
+        BUG-R21-PARSER-005修复：抽取公共文件读取方法，避免四个解析器重复代码
+        """
+        encodings = ['utf-8', 'gbk', 'gb2312', 'latin-1', 'cp1252']
+        for encoding in encodings:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    content = f.read()
+                # 验证读取的内容是否有效
+                if content and content.strip():
+                    return content
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+            except Exception:
+                continue
+        # 最后尝试忽略错误
+        try:
+            with open(file_path, 'r', errors='ignore') as f:
+                return f.read()
+        except Exception:
+            return None
+
+    @staticmethod
     def compute_end_line(lines: list, start_line: int,
                           comment_single: str = "//",
                           comment_multi_start: str = "/*",

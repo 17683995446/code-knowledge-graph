@@ -37,27 +37,10 @@ class GoParser(BaseParser):
         if not self.check_file_size(file_path):
             return result
         
-        source_code = None
-
-        # BUG-GO-02修复：尝试多种编码
-        encodings = ["utf-8", "gbk", "gb2312", "latin-1", "cp1252"]
-        for encoding in encodings:
-            try:
-                with open(file_path, "r", encoding=encoding) as fh:
-                    source_code = fh.read()
-                break
-            except UnicodeDecodeError:
-                continue
-            except Exception as e:
-                continue
-
-        # 如果所有编码都失败，使用errors='ignore'作为最后手段
+        # BUG-R21-PARSER-005修复：使用BaseParser公共方法读取文件内容
+        source_code = self._read_file_content(file_path)
         if source_code is None:
-            try:
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
-                    source_code = fh.read()
-            except Exception as e:
-                return result
+            return result
 
         try:
             if not source_code.strip():

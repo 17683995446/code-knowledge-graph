@@ -9,7 +9,7 @@ import logging
 import threading
 from datetime import datetime
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -25,9 +25,8 @@ logger = logging.getLogger(__name__)
 # BUG-MAIN-01修复: 全局变量用于优雅关闭
 _global_update_engine = None
 # BUG-SVR-08修复: 全量同步锁，防止并发全量同步
-# BUG-SVR-CONC-002修复: 使用asyncio.Lock替代threading.Lock，适配异步上下文
-# 注意：asyncio.Lock需要在事件循环中初始化，这里声明为None，在create_app中初始化
-_sync_lock = None
+# BUG-R21-WEB-001修复: 使用threading.Lock替代asyncio.Lock，因为full_sync在线程池中执行
+_sync_lock = threading.Lock()
 
 
 def create_app(project_path: str, database_path: str = "code_knowledge.db",
@@ -71,9 +70,6 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
     # BUG-MAIN-01修复: 设置全局update_engine引用
     global _global_update_engine
     _global_update_engine = update_engine
-    # BUG-SVR-CONC-002修复: 在事件循环中初始化asyncio.Lock
-    global _sync_lock
-    _sync_lock = asyncio.Lock()
 
     @app.on_event("startup")
     async def startup_event():
@@ -83,6 +79,8 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
         # BUG-API-02修复：在线程池中执行全量同步，避免阻塞事件循环
         # BUG-SVR-02修复：添加异常处理，确保全量同步失败不导致启动崩溃
         # BUG-SVR-TIME-001修复：添加超时控制，防止全量同步无限阻塞
+        # BUG-R21-WEB-001修复：使用threading.Lock保护线程池中的全量同步
+        _sync_lock.acquire()
         try:
             loop = asyncio.get_running_loop()
             # 使用wait_for添加10分钟超时控制
@@ -98,6 +96,8 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
             logger.error(f"全量同步失败: {e}")
             # 即使同步失败也继续启动，允许服务以空数据库运行
             sync_result = {"total": 0, "updated": 0, "error": str(e)}
+        finally:
+            _sync_lock.release()
         update_engine.start()
         asyncio.create_task(update_engine.start_async_loop())
         logger.info(f"文件监控已启动")
@@ -132,6 +132,9 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
         """
         BUG-SVR-MEM-003修复: 添加limit参数，超过阈值返回错误提示
         """
+        # BUG-R21-WEB-004修复：添加下界验证，防止limit<=0导致异常
+        if limit < 1:
+            limit = 5000
         # 限制最大值为10000，防止内存溢出
         if limit > 10000:
             return JSONResponse(
@@ -165,17 +168,20 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
     @app.get("/api/file/{file_path:path}")
     async def get_file_details(file_path: str):
         # BUG-SVR-012修复：使用realpath检查路径是否在project_path内，防止路径遍历攻击
-        import os
+        # BUG-R21-WEB-002修复：添加非空校验和符号链接检查
+        if not file_path or file_path.startswith(".."):
+            return JSONResponse(status_code=400, content={"error": "非法路径"})
         resolved_path = os.path.realpath(os.path.join(project_path, file_path))
-        if not resolved_path.startswith(os.path.realpath(project_path) + os.sep) and resolved_path != os.path.realpath(project_path):
-            raise HTTPException(status_code=400, detail="非法路径")
+        real_project = os.path.realpath(project_path)
+        if not resolved_path.startswith(real_project + os.sep) and resolved_path != real_project:
+            return JSONResponse(status_code=400, content={"error": "非法路径"})
         # BUG-SVR-PATH-02修复：数据库存储的是绝对路径，优先用绝对路径查询，回退到相对路径
         details = database.get_file_details(resolved_path)
         if not details:
-            normalized_path = os.path.relpath(resolved_path, os.path.realpath(project_path))
+            normalized_path = os.path.relpath(resolved_path, real_project)
             details = database.get_file_details(normalized_path)
         if not details:
-            raise HTTPException(status_code=404, detail="文件未找到")
+            return JSONResponse(status_code=404, content={"error": "文件未找到"})
         return details
 
     @app.get("/api/languages")
@@ -190,20 +196,16 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
         """
         触发全量同步
         BUG-SVR-08修复：添加同步锁防止并发全量同步
-        BUG-SVR-CONC-002修复：使用asyncio.Lock替代threading.Lock
+        BUG-R21-WEB-001修复：使用threading.Lock替代asyncio.Lock
         """
         # 检查是否已有同步在进行
-        if _sync_lock is None:
-            return JSONResponse(
-                status_code=500,
-                content={"error": "服务初始化中，请稍后重试"}
-            )
-        if _sync_lock.locked():
+        # BUG-R21-WEB-001修复：使用threading.Lock替代asyncio.Lock
+        if not _sync_lock.acquire(blocking=False):
             return JSONResponse(
                 status_code=429,
                 content={"error": "已有全量同步正在进行中，请稍后重试"}
             )
-        async with _sync_lock:
+        try:
             # BUG-API-01修复：在线程池中执行全量同步
             # BUG-SVR-SYNC-01修复：添加异常处理，统一错误响应格式
             loop = asyncio.get_running_loop()
@@ -220,6 +222,8 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
                     status_code=500,
                     content={"error": f"全量同步失败: {str(e)}"}
                 )
+        finally:
+            _sync_lock.release()
 
     @app.get("/api/analysis/structure")
     async def analyze_structure():
