@@ -29,16 +29,6 @@ class CodeFileHandler(FileSystemEventHandler):
         ".tsx": "javascript",      # TSX由JavaScript解析器处理
         ".java": "java",
         ".go": "go",
-        ".c": "c",
-        ".cpp": "cpp",
-        ".h": "c",
-        ".hpp": "cpp",
-        ".rs": "rust",
-        ".kt": "kotlin",
-        ".swift": "swift",
-        ".rb": "ruby",
-        ".php": "php",
-        ".ets": "arkts",
     }
 
     def __init__(self, callback: Callable, ignored_dirs: Optional[Set[str]] = None):

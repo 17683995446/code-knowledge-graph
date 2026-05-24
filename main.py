@@ -109,38 +109,33 @@ def main(project_path: str, port: int, host: str, db: str, api_key: str, verbose
     # BUG-R21-WEB-006修复：使用threading.Event替代asyncio.Event，因为signal_handler在主线程中调用
     _shutdown_event = threading.Event()
     
-    signal.signal(signal.SIGINT, signal_handler)
-    # BUG-MAIN-04修复: Windows平台SIGTERM不可用，使用SIGBREAK或跳过
-    if platform.system() == "Windows":
-        # Windows平台：SIGTERM不可用，使用SIGBREAK替代
-        try:
-            signal.signal(signal.SIGBREAK, signal_handler)  # type: ignore
-            logger.info("已注册信号处理器 (SIGINT, SIGBREAK)")
-        except (AttributeError, ValueError):
-            logger.info("已注册信号处理器 (SIGINT)")
-    else:
-        # Unix/Linux平台：正常注册SIGTERM
-        signal.signal(signal.SIGTERM, signal_handler)
-        logger.info("已注册信号处理器 (SIGINT, SIGTERM)")
+    # B2修复：不再注册自定义信号处理器（会被uvicorn内部覆盖），
+    # 改为在try/finally中直接清理资源
 
     project_path = os.path.abspath(project_path)
     if not os.path.isdir(project_path):
         logger.error(f"项目路径不存在: {project_path}")
         sys.exit(1)
 
+    # B4修复：database_path默认值基于project_path而非CWD
+    if db and db != "code_knowledge.db":
+        database_path = db
+    else:
+        database_path = os.path.join(project_path, "code_knowledge.db")
+
     logger.info("=" * 60)
     logger.info("  代码知识图谱系统 v1.0.0")
     logger.info("  Code Knowledge Graph System")
     logger.info("=" * 60)
     logger.info(f"  项目路径: {project_path}")
-    logger.info(f"  数据库:   {db}")
+    logger.info(f"  数据库:   {database_path}")
     logger.info(f"  服务地址: http://{host}:{port}")
     logger.info(f"  LLM集成:  {'已启用' if api_key else '未配置'}")
     logger.info("=" * 60)
 
     app = create_app(
         project_path=project_path,
-        database_path=db,
+        database_path=database_path,
         host=host,
         port=port,
         siliconflow_api_key=api_key
@@ -155,6 +150,13 @@ def main(project_path: str, port: int, host: str, db: str, api_key: str, verbose
     except Exception:
         pass  # 如果获取失败，优雅关闭时跳过
 
+    # B1修复：从app.state获取数据库实例引用，用于资源清理
+    global _db_instance
+    try:
+        _db_instance = app.state.database
+    except AttributeError:
+        pass  # 如果app.state中没有database属性，跳过
+
     try:
         uvicorn.run(
             app,
@@ -167,10 +169,17 @@ def main(project_path: str, port: int, host: str, db: str, api_key: str, verbose
     except KeyboardInterrupt:
         logger.info("收到键盘中断，正在关闭...")
     finally:
-        # BUG-MAIN-01修复: 确保清理资源
+        # B2修复：在finally中直接清理资源（不再依赖被覆盖的信号处理器）
         if _update_engine:
             try:
                 _update_engine.stop()
+            except Exception:
+                pass
+        # B1修复：清理数据库连接
+        if _db_instance:
+            try:
+                _db_instance.close()
+                logger.info("数据库连接已关闭")
             except Exception:
                 pass
         logger.info("系统已关闭")

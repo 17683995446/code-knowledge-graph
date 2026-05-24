@@ -151,23 +151,23 @@ class SiliconFlowClient:
                 self.API_BASE_URL,
                 json=payload
             )
-                if response.status_code == 200:
-                    data = response.json()
-                    # BUG-LLM-03修复：更完整的响应解析
-                    return self._parse_response(data)
-                elif response.status_code == 429:
-                    # BUG-LLM-05修复：处理API限流(429状态码)
-                    retry_after = None
-                    retry_after_header = response.headers.get("Retry-After")
-                    if retry_after_header:
-                        try:
-                            retry_after = float(retry_after_header)
-                        except ValueError:
-                            pass
-                    raise RateLimitError(f"API限流: {response.text}", retry_after)
-                else:
-                    logger.error(f"硅基流动API错误: {response.status_code} - {response.text}")
-                    return None
+            if response.status_code == 200:
+                data = response.json()
+                # BUG-LLM-03修复：更完整的响应解析
+                return self._parse_response(data)
+            elif response.status_code == 429:
+                # BUG-LLM-05修复：处理API限流(429状态码)
+                retry_after = None
+                retry_after_header = response.headers.get("Retry-After")
+                if retry_after_header:
+                    try:
+                        retry_after = float(retry_after_header)
+                    except ValueError:
+                        pass
+                raise RateLimitError(f"API限流: {response.text}", retry_after)
+            else:
+                logger.error(f"硅基流动API错误: {response.status_code} - {response.text}")
+                return None
         except httpx.TimeoutException:
             # BUG-LLM-07/08修复：超时时抛出异常，让外层_chat_with_retry捕获并重试
             logger.warning(f"硅基流动API请求超时(>{self.timeout}秒)，将重试")

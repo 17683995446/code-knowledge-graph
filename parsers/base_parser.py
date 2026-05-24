@@ -149,8 +149,9 @@ class BaseParser(ABC):
         BUG-BP-BOUND-01修复：添加输入参数边界检查
         """
         # BUG-BP-BOUND-01修复：输入参数边界检查
+        # P2-BP-01修复：返回值clamp到文件总行数，避免越界
         if not lines or start_line < 1 or start_line > len(lines):
-            return max(1, start_line) if start_line > 0 else 1
+            return min(max(1, start_line), len(lines)) if lines else max(1, start_line)
         
         depth = 0
         found_first_brace = False

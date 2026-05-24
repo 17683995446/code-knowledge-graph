@@ -300,7 +300,7 @@ class UpdateEngine:
                         conn.execute("ROLLBACK TO SAVEPOINT file_update")
                     except Exception:
                         pass
-                    self.database.rollback()
+                    # P2-UE-01修复：移除冗余的rollback()，ROLLBACK TO SAVEPOINT已足够
                     if "database is locked" in str(e) and attempt < max_retries - 1:
                         time.sleep(0.05 * (attempt + 1))
                         continue
@@ -499,6 +499,14 @@ class UpdateEngine:
             # 第一阶段：提取所有实体（不建立跨文件引用）
             logger.info(f"全量同步第一阶段: 提取{len(files_to_process)}个文件的实体...")
             file_ids_list = []
+            # P0-UE-06修复：检查点恢复时，重建已处理文件的file_ids_list
+            if can_resume and already_processed:
+                conn = self.database._get_connection()
+                for f in already_processed:
+                    record = self.database.get_file_by_path(f)
+                    if record:
+                        file_ids_list.append(record.file_id)
+                logger.info(f"从数据库恢复了{len(file_ids_list)}个已处理文件的file_id")
             processed_files = list(already_processed)  # BUG-UE-RECV-004: 从已处理文件开始
 
             for i, file_path in enumerate(files_to_process):

@@ -34,6 +34,10 @@ function initNavigation() {
 }
 
 function switchPage(pageName) {
+    // P2-FE-01修复：切换离开graph页面时停止图谱动画
+    if (AppState.currentPage === 'graph' && pageName !== 'graph') {
+        stopAnimationLoop();
+    }
     AppState.currentPage = pageName;
     document.querySelectorAll('.nav-tab').forEach(tab => {
         tab.classList.toggle('active', tab.dataset.page === pageName);

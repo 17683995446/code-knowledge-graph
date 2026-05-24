@@ -416,21 +416,21 @@ class KnowledgeDatabase:
                 type_name = func_info.get("type_name", "") or "__module__"
                 type_id = type_id_map.get(type_name)
                 if type_id is None:
+                    # P1-UE-02修复：统一使用"__module__"作为自动创建的类型名
                     cursor = conn.execute(
                         "INSERT OR IGNORE INTO types (name, file_id, kind, flags) VALUES (?, ?, 'module', 0)",
-                        (type_name, file_id)
+                        ("__module__", file_id)
                     )
                     type_id = cursor.lastrowid
                     if type_id:
-                        type_id_map[type_name] = type_id
+                        type_id_map["__module__"] = type_id
                     else:
-                        # 类型已存在，查询获取ID
                         existing = conn.execute(
                             "SELECT id FROM types WHERE name=? AND file_id=?",
-                            (type_name, file_id)
+                            ("__module__", file_id)
                         ).fetchone()
                         type_id = existing["id"] if existing else 0
-                        type_id_map[type_name] = type_id
+                        type_id_map["__module__"] = type_id
 
                 # BUG-DB-012修复: type_id为0时跳过插入，避免无效外键
                 if type_id and type_id > 0:
@@ -486,7 +486,7 @@ class KnowledgeDatabase:
                 # BUG-R21-CORE-007修复：合并__imports__和__module__的重复处理逻辑
                 # __imports__ 和 __module__ 引用：表示当前文件导入了 to_entity
                 if from_entity in ("__imports__", "__module__") and current_file_id is not None and current_file_id > 0:
-                    to_id = self._find_entity_id(conn, to_entity)
+                    to_id = self._find_entity_id(conn, to_entity, current_file_id=current_file_id)
                     if to_id:
                         for row in conn.execute(
                             "SELECT id FROM types WHERE file_id = ? AND kind != 'module'",
@@ -505,10 +505,10 @@ class KnowledgeDatabase:
 
                 # 常规引用：跨文件查找
                 if from_id and not to_id:
-                    to_id = self._find_entity_id(conn, to_entity)
+                    to_id = self._find_entity_id(conn, to_entity, current_file_id=current_file_id)
 
                 if to_id and not from_id:
-                    from_id = self._find_entity_id(conn, from_entity)
+                    from_id = self._find_entity_id(conn, from_entity, current_file_id=current_file_id)
 
                 if from_id and to_id and from_id != to_id:
                     try:
@@ -519,21 +519,34 @@ class KnowledgeDatabase:
                     except sqlite3.IntegrityError:
                         pass
 
-    def _find_entity_id(self, conn, name: str) -> Optional[int]:
-        """在types和functions表中查找实体ID"""
+    def _find_entity_id(self, conn, name: str, current_file_id: int = None) -> Optional[int]:
+        """查找实体ID。P0-DB-02修复：同名实体歧义时优先选择同文件实体"""
         if not name or name == "__module__":
             return None
-        # 先查types表
+
+        # 优先查找同文件的实体
+        if current_file_id:
+            row = conn.execute(
+                "SELECT id FROM types WHERE name = ? AND file_id = ? LIMIT 1",
+                (name, current_file_id)
+            ).fetchone()
+            if row:
+                return row["id"]
+            row = conn.execute(
+                "SELECT id FROM functions WHERE name = ? AND file_id = ? LIMIT 1",
+                (name, current_file_id)
+            ).fetchone()
+            if row:
+                return row["id"]
+
+        # 回退到全局查找
         row = conn.execute(
-            "SELECT id FROM types WHERE name = ? LIMIT 1",
-            (name,)
+            "SELECT id FROM types WHERE name = ? LIMIT 1", (name,)
         ).fetchone()
         if row:
             return row["id"]
-        # 再查functions表
         row = conn.execute(
-            "SELECT id FROM functions WHERE name = ? LIMIT 1",
-            (name,)
+            "SELECT id FROM functions WHERE name = ? LIMIT 1", (name,)
         ).fetchone()
         if row:
             return row["id"]
@@ -634,7 +647,7 @@ class KnowledgeDatabase:
 
         # 调用关系 - 只保留两端都存在的边
         # BUG-DB-MEM-001修复: 添加LIMIT限制边数量
-        call_rows = conn.execute("SELECT caller_id, callee_id FROM calls LIMIT ?", (limit,)).fetchall()
+        call_rows = conn.execute("SELECT caller_id, callee_id FROM calls LIMIT ?", (min(limit * 2, 50000),)).fetchall()
         for row in call_rows:
             if row["caller_id"] in valid_func_ids and row["callee_id"] in valid_func_ids:
                 edges.append({
@@ -648,7 +661,7 @@ class KnowledgeDatabase:
         ref_rows = conn.execute("""
             SELECT from_id, to_id, kind FROM code_references
             LIMIT ?
-        """, (limit,)).fetchall()
+        """, (min(limit * 2, 50000),)).fetchall()
         for row in ref_rows:
             from_id = row["from_id"]
             to_id = row["to_id"]
