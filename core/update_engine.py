@@ -275,32 +275,40 @@ class UpdateEngine:
                 return
 
             # BUG-DB-TRANSACTION-01修复：使用SAVEPOINT确保删除+插入的原子性
+            # BUG-DB-TIMEOUT-03修复：添加重试机制应对SQLite并发写锁冲突
             conn = self.database._get_connection()
-            try:
-                # 创建SAVEPOINT，保护后续操作
-                conn.execute("SAVEPOINT file_update")
-                
-                file_record = self.database.get_file_by_path(file_path)
-                if file_record:
-                    self.database.delete_file_cascade(file_record.file_id)
-
-                file_id = self.database.upsert_file(file_path, language, file_hash)
-
-                if parse_result:
-                    self._store_parse_result(file_id, parse_result)
-
-                # 释放SAVEPOINT（确认操作）
-                conn.execute("RELEASE SAVEPOINT file_update")
-                self.database.commit()
-            except Exception as e:
-                # BUG-DB-TRANSACTION-01修复：回滚到SAVEPOINT，恢复旧数据
+            max_retries = 10
+            for attempt in range(max_retries):
                 try:
-                    conn.execute("ROLLBACK TO SAVEPOINT file_update")
-                except Exception:
-                    pass
-                self.database.rollback()
-                logger.error(f"更新文件失败，已回滚: {file_path}: {e}")
-                raise
+                    # 创建SAVEPOINT，保护后续操作
+                    conn.execute("SAVEPOINT file_update")
+                    
+                    file_record = self.database.get_file_by_path(file_path)
+                    if file_record:
+                        self.database.delete_file_cascade(file_record.file_id)
+
+                    file_id = self.database.upsert_file(file_path, language, file_hash)
+
+                    if parse_result:
+                        self._store_parse_result(file_id, parse_result)
+
+                    # 释放SAVEPOINT（确认操作）
+                    conn.execute("RELEASE SAVEPOINT file_update")
+                    self.database.commit()
+                    break  # 成功，退出重试循环
+                except Exception as e:
+                    # BUG-DB-TIMEOUT-03修复：数据库锁冲突时重试
+                    try:
+                        conn.execute("ROLLBACK TO SAVEPOINT file_update")
+                    except Exception:
+                        pass
+                    self.database.rollback()
+                    if "database is locked" in str(e) and attempt < max_retries - 1:
+                        import time as _time
+                        _time.sleep(0.05 * (attempt + 1))
+                        continue
+                    logger.error(f"更新文件失败，已回滚: {file_path}: {e}")
+                    raise
 
     def _store_parse_result(self, file_id: int, parse_result, language: str = ""):
         """将解析结果存储到数据库（不commit，由调用者控制事务）"""
@@ -460,34 +468,49 @@ class UpdateEngine:
             checkpoint, all_files
         )
         
+        # BUG-AUDIT-022修复：创建临时表保存原始references数据，供第二阶段使用
+        # 这是解决全量同步两阶段设计缺陷的关键：第一阶段不存references到code_references，
+        # 但需要把原始references数据暂存到临时表，第二阶段再从临时表读取并建立跨文件引用
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS _sync_raw_references (
+                    file_id INTEGER NOT NULL,
+                    from_entity TEXT NOT NULL,
+                    to_entity TEXT NOT NULL,
+                    kind TEXT NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_raw_refs_file ON _sync_raw_references(file_id)")
+            conn.commit()
+            # 如果不是从检查点恢复，清空临时表
+            if not can_resume:
+                conn.execute("DELETE FROM _sync_raw_references")
+                conn.commit()
+        except Exception as e:
+            logger.error(f"创建临时引用表失败: {e}")
+            raise RuntimeError(f"全量同步创建临时表失败: {e}")
+
         if can_resume:
             logger.info(f"从检查点恢复同步，跳过{len(already_processed)}个已处理文件")
-            # 从检查点恢复时，需要重建parse_results（从数据库读取）
-            parse_results = {}
-            # 获取已处理文件的file_id
-            for file_path in already_processed:
-                file_record = self.database.get_file_by_path(file_path)
-                if file_record:
-                    # 注意：这里无法恢复完整的parse_result，但第一阶段已完成
-                    # 只需要继续处理未完成的文件
-                    pass
         else:
             files_to_process = all_files
 
         # 第一阶段：提取所有实体（不建立跨文件引用）
         logger.info(f"全量同步第一阶段: 提取{len(files_to_process)}个文件的实体...")
-        # BUG-UE-MEM-001修复：使用列表存储文件ID，避免parse_result占用大量内存
-        file_ids_list = []  # 只存储file_id，不存储完整的parse_result
+        file_ids_list = []
         processed_files = list(already_processed)  # BUG-UE-RECV-004: 从已处理文件开始
         
         for i, file_path in enumerate(files_to_process):
             try:
                 file_id, parse_result = self._update_single_file_phase1(file_path)
                 if file_id:
-                    # BUG-UE-MEM-001修复：只存储file_id，parse_result在第二阶段从数据库读取
                     file_ids_list.append(file_id)
                     updated_files += 1
-                    processed_files.append(file_path)  # BUG-UE-RECV-004: 记录已处理文件
+                    processed_files.append(file_path)
+                    
+                    # BUG-AUDIT-022修复：将原始references保存到临时表，供第二阶段使用
+                    if parse_result and parse_result.references:
+                        self._save_raw_references(file_id, parse_result.references)
                     
                     # BUG-UE-RECV-004: 每100个文件保存一次检查点
                     if (i + 1) % 100 == 0:
@@ -500,22 +523,22 @@ class UpdateEngine:
         self._save_checkpoint(processed_files, len(files_to_process), phase=2)
 
         # 第二阶段：建立跨文件引用关系
-        # BUG-UE-MEM-001修复：分批处理，每批1000个文件，处理完立即释放内存
+        # BUG-AUDIT-022修复：从临时表_sync_raw_references读取原始references数据
+        # 此时所有文件的实体（types/functions）已全部入库，可以正确解析跨文件引用
         logger.info(f"全量同步第二阶段: 建立{updated_files}个文件的引用关系...")
-        BATCH_SIZE = 1000  # 每批处理1000个文件
-        phase2_errors = 0  # BUG-AUDIT-026修复：记录第二阶段失败数
+        BATCH_SIZE = 1000
+        phase2_errors = 0
         for batch_start in range(0, len(file_ids_list), BATCH_SIZE):
             batch_file_ids = file_ids_list[batch_start:batch_start + BATCH_SIZE]
             for file_id in batch_file_ids:
                 try:
-                    # BUG-UE-MEM-001修复：从数据库读取parse_result，不占用内存
-                    parse_result = self._load_parse_result_from_db(file_id)
-                    if parse_result and parse_result.references:
-                        self._store_references_only(file_id, parse_result)
+                    # BUG-AUDIT-022修复：从临时表读取原始references，而非空的code_references表
+                    raw_refs = self._load_raw_references(file_id)
+                    if raw_refs:
+                        self._store_references_only(file_id, raw_refs)
                 except Exception as exception:
                     logger.error(f"引用关系建立失败 file_id={file_id}: {exception}")
                     phase2_errors += 1
-            # BUG-UE-MEM-001修复：强制垃圾回收，释放内存
             import gc
             gc.collect()
 
@@ -528,13 +551,14 @@ class UpdateEngine:
             # BUG-UE-RECV-004: 同步完成，清除检查点
             self._clear_checkpoint()
 
-        # BUG-UE-004修复：同步成功后删除备份表
+        # BUG-UE-004修复：同步成功后删除备份表和临时引用表
         try:
             for table in ["_backup_files", "_backup_types", "_backup_functions",
-                          "_backup_calls", "_backup_code_references"]:
+                          "_backup_calls", "_backup_code_references",
+                          "_sync_raw_references"]:
                 conn.execute(f"DROP TABLE IF EXISTS {table}")
             conn.commit()
-            logger.debug("备份表已清理")
+            logger.debug("备份表和临时引用表已清理")
         except Exception as e:
             logger.warning(f"清理备份表失败: {e}")
 
@@ -616,8 +640,10 @@ class UpdateEngine:
             self.database.rollback()
             raise
 
-    def _store_references_only(self, file_id: int, parse_result):
-        """全量同步第二阶段：只建立引用关系"""
+    def _store_references_only(self, file_id: int, references):
+        """全量同步第二阶段：只建立引用关系
+        BUG-AUDIT-022修复：接受references列表而非ParseResult对象
+        """
         conn = self.database._get_connection()
         entity_id_map = {}
 
@@ -637,10 +663,10 @@ class UpdateEngine:
             if row["name"] not in entity_id_map:
                 entity_id_map[row["name"]] = row["id"]
 
-        if parse_result.references:
+        if references:
             self.database.insert_references(
                 [{"from_entity": r.from_entity, "to_entity": r.to_entity, "kind": r.kind}
-                 for r in parse_result.references],
+                 for r in references],
                 entity_id_map,
                 current_file_id=file_id
             )
@@ -699,6 +725,40 @@ class UpdateEngine:
             await asyncio.get_running_loop().run_in_executor(
                 None, self._process_batch_sync, batch
             )
+
+    # ==================== BUG-AUDIT-022: 原始references临时存储 ====================
+
+    def _save_raw_references(self, file_id: int, references):
+        """BUG-AUDIT-022修复：将原始references数据保存到临时表"""
+        conn = self.database._get_connection()
+        try:
+            for ref in references:
+                conn.execute(
+                    "INSERT INTO _sync_raw_references (file_id, from_entity, to_entity, kind) VALUES (?, ?, ?, ?)",
+                    (file_id, ref.from_entity, ref.to_entity, ref.kind)
+                )
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"保存原始references失败 file_id={file_id}: {e}")
+            raise
+
+    def _load_raw_references(self, file_id: int):
+        """BUG-AUDIT-022修复：从临时表加载原始references数据"""
+        from parsers.base_parser import ReferenceInfo
+        
+        conn = self.database._get_connection()
+        references = []
+        for row in conn.execute(
+            "SELECT from_entity, to_entity, kind FROM _sync_raw_references WHERE file_id = ?",
+            (file_id,)
+        ).fetchall():
+            references.append(ReferenceInfo(
+                from_entity=row["from_entity"],
+                to_entity=row["to_entity"],
+                kind=row["kind"]
+            ))
+        return references if references else None
 
     # ==================== BUG-UE-RECV-004: 检查点机制 ====================
 
@@ -782,83 +842,4 @@ class UpdateEngine:
         """BUG-UE-RECV-004修复：检查是否有待恢复的检查点"""
         return self._load_checkpoint() is not None
 
-    def _load_parse_result_from_db(self, file_id: int):
-        """
-        BUG-UE-MEM-001修复：从数据库加载解析结果，避免内存占用
-        返回一个模拟的ParseResult对象，包含references信息
-        """
-        from parsers.base_parser import ParseResult, ReferenceInfo
-        
-        conn = self.database._get_connection()
-        
-        # 从数据库读取该文件的引用关系
-        references = []
-        
-        # 获取文件路径
-        file_row = conn.execute(
-            "SELECT path FROM files WHERE id = ?", (file_id,)
-        ).fetchone()
-        
-        if not file_row:
-            return None
-            
-        file_path = file_row["path"]
-        
-        # 读取types和functions以构建entity_id_map
-        type_ids = {}
-        for row in conn.execute("SELECT id, name FROM types WHERE file_id = ?", (file_id,)).fetchall():
-            type_ids[row["name"]] = row["id"]
-        
-        func_ids = {}
-        for row in conn.execute(
-            "SELECT f.id, f.name, t.name as type_name FROM functions f "
-            "LEFT JOIN types t ON f.type_id = t.id WHERE f.file_id = ?", (file_id,)
-        ).fetchall():
-            type_name = row['type_name'] or ""
-            composite_key = f"{row['name']}@{type_name}"
-            func_ids[composite_key] = row["id"]
-            if row["name"] not in func_ids:
-                func_ids[row["name"]] = row["id"]
-        
-        # 构建entity_id_map
-        entity_id_map = {**type_ids, **func_ids}
-        
-        # BUG-AUDIT-024修复：构建反向映射，使用O(1)查找替代O(n*m)遍历
-        # 同时确保优先使用简单name而非复合key
-        id_to_name = {}
-        # 先添加type_ids（优先级低）
-        for name, eid in type_ids.items():
-            if eid not in id_to_name:
-                id_to_name[eid] = name
-        # 再添加func_ids的简单name（优先级高）
-        for name, eid in func_ids.items():
-            if "@" not in name:  # 简单name优先
-                id_to_name[eid] = name
-        # 最后添加复合key（最低优先级）
-        for name, eid in func_ids.items():
-            if "@" in name and eid not in id_to_name:
-                id_to_name[eid] = name
-        
-        # 从code_references表读取引用关系
-        all_ids = list(type_ids.values()) + list(func_ids.values())
-        if all_ids:
-            placeholders = ",".join("?" * len(all_ids))
-            for row in conn.execute(
-                f"SELECT from_id, to_id, kind FROM code_references WHERE from_id IN ({placeholders})",
-                tuple(all_ids)
-            ).fetchall():
-                # BUG-AUDIT-024修复：使用反向映射O(1)查找
-                from_name = id_to_name.get(row["from_id"])
-                to_name = id_to_name.get(row["to_id"])
-                
-                if from_name and to_name:
-                    references.append(ReferenceInfo(
-                        from_entity=from_name,
-                        to_entity=to_name,
-                        kind=row["kind"]
-                    ))
-        
-        # 创建ParseResult对象（只包含references）
-        result = ParseResult()
-        result.references = references
-        return result
+

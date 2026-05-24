@@ -100,13 +100,13 @@ class WebSocketManager:
         except Exception as e:
             logger.warning(f"计算消息大小失败: {e}")
 
+        # BUG-WS-BROADCAST-SLEEP-01修复：频率限制的sleep移到锁外面，避免持锁阻塞
+        current_time = time.time()
+        time_since_last = current_time - self._last_broadcast_time
+        if time_since_last < self.BROADCAST_MIN_INTERVAL:
+            await asyncio.sleep(self.BROADCAST_MIN_INTERVAL - time_since_last)
+
         async with self._broadcast_lock:
-            current_time = time.time()
-            
-            # 频率限制：确保广播间隔不小于最小间隔
-            time_since_last = current_time - self._last_broadcast_time
-            if time_since_last < self.BROADCAST_MIN_INTERVAL:
-                await asyncio.sleep(self.BROADCAST_MIN_INTERVAL - time_since_last)
             
             # 复制集合，避免遍历期间修改
             connections = list(self.active_connections)

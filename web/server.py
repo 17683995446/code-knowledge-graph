@@ -77,12 +77,14 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
 
     @app.on_event("startup")
     async def startup_event():
+        # BUG-WS-HB-01修复：启动心跳检测任务
+        await websocket_manager.start_heartbeat_check()
         logger.info(f"正在全量同步项目: {project_path}")
         # BUG-API-02修复：在线程池中执行全量同步，避免阻塞事件循环
         # BUG-SVR-02修复：添加异常处理，确保全量同步失败不导致启动崩溃
         # BUG-SVR-TIME-001修复：添加超时控制，防止全量同步无限阻塞
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             # 使用wait_for添加10分钟超时控制
             sync_result = await asyncio.wait_for(
                 loop.run_in_executor(None, update_engine.full_sync),
@@ -167,9 +169,11 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
         resolved_path = os.path.realpath(os.path.join(project_path, file_path))
         if not resolved_path.startswith(os.path.realpath(project_path) + os.sep) and resolved_path != os.path.realpath(project_path):
             raise HTTPException(status_code=400, detail="非法路径")
-        # BUG-SVR-PATH-01修复：使用规范化后的相对路径查询数据库
-        normalized_path = os.path.relpath(resolved_path, os.path.realpath(project_path))
-        details = database.get_file_details(normalized_path)
+        # BUG-SVR-PATH-02修复：数据库存储的是绝对路径，优先用绝对路径查询，回退到相对路径
+        details = database.get_file_details(resolved_path)
+        if not details:
+            normalized_path = os.path.relpath(resolved_path, os.path.realpath(project_path))
+            details = database.get_file_details(normalized_path)
         if not details:
             raise HTTPException(status_code=404, detail="文件未找到")
         return details
@@ -201,13 +205,21 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
             )
         async with _sync_lock:
             # BUG-API-01修复：在线程池中执行全量同步
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, update_engine.full_sync)
-            await websocket_manager.broadcast({
-                "type": "full_sync",
-                "data": {"timestamp": datetime.now().isoformat(), **result}
-            })
-            return result
+            # BUG-SVR-SYNC-01修复：添加异常处理，统一错误响应格式
+            loop = asyncio.get_running_loop()
+            try:
+                result = await loop.run_in_executor(None, update_engine.full_sync)
+                await websocket_manager.broadcast({
+                    "type": "full_sync",
+                    "data": {"timestamp": datetime.now().isoformat(), **result}
+                })
+                return result
+            except Exception as e:
+                logger.error(f"手动全量同步失败: {e}")
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": f"全量同步失败: {str(e)}"}
+                )
 
     @app.get("/api/analysis/structure")
     async def analyze_structure():
@@ -263,6 +275,8 @@ def create_app(project_path: str, database_path: str = "code_knowledge.db",
         try:
             while True:
                 data = await websocket.receive_text()
+                # BUG-WS-ACTIVITY-01修复：收到消息时更新连接活跃时间
+                websocket_manager.update_connection_activity(websocket)
                 if data == "ping":
                     await websocket.send_json({"type": "pong"})
         except WebSocketDisconnect:
@@ -280,7 +294,9 @@ def _make_update_callback(websocket_manager: WebSocketManager,
     """创建更新回调函数"""
     async def on_update(updated_files: list, errors: list):
         await websocket_manager.send_update_notification(updated_files, errors)
-        stats = database.get_statistics()
+        # BUG-SVR-CALLBACK-01修复：使用run_in_executor避免阻塞事件循环
+        loop = asyncio.get_running_loop()
+        stats = await loop.run_in_executor(None, database.get_statistics)
         await websocket_manager.send_stats_update(stats)
     return on_update
 

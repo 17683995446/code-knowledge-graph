@@ -57,6 +57,9 @@ function switchPage(pageName) {
 }
 
 // ==================== WebSocket ====================
+let wsHeartbeatTimer = null;
+let wsReconnectTimer = null;
+
 function initWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -67,17 +70,31 @@ function initWebSocket() {
         AppState.isConnected = true;
         updateConnectionStatus(true);
         addEventLog('sync', '已连接到知识图谱服务');
+        // BUG-FE-HEARTBEAT-01修复：启动前端心跳ping，每30秒发送一次
+        if (wsHeartbeatTimer) clearInterval(wsHeartbeatTimer);
+        wsHeartbeatTimer = setInterval(() => {
+            if (AppState.websocket && AppState.websocket.readyState === WebSocket.OPEN) {
+                AppState.websocket.send('ping');
+            }
+        }, 30000);
     };
 
     AppState.websocket.onclose = () => {
         AppState.isConnected = false;
         updateConnectionStatus(false);
         addEventLog('error', '连接已断开，5秒后重连...');
+        // BUG-FE-HEARTBEAT-01修复：断开时清理心跳定时器
+        if (wsHeartbeatTimer) {
+            clearInterval(wsHeartbeatTimer);
+            wsHeartbeatTimer = null;
+        }
         // BUG-FE-01 修复：防止重连时创建多个连接
         if (AppState.websocket) {
             AppState.websocket = null;
         }
-        setTimeout(() => {
+        // BUG-FE-RECONNECT-01修复：重连时清理旧定时器
+        if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = setTimeout(() => {
             if (!AppState.websocket) initWebSocket();
         }, 5000);
     };
@@ -122,10 +139,12 @@ function handleWebSocketMessage(message) {
 }
 
 function handleFileUpdate(data) {
-    data.updated_files.forEach(file => {
+    // BUG-NULL-DEFENSE-01修复：添加空值防御，防止data为null或字段缺失时崩溃
+    if (!data) return;
+    (data.updated_files || []).forEach(file => {
         addEventLog('update', `文件已更新: ${getShortPath(file)}`);
     });
-    data.errors.forEach(err => {
+    (data.errors || []).forEach(err => {
         addEventLog('error', `更新失败: ${err}`);
     });
     loadAllData();
@@ -134,11 +153,12 @@ function handleFileUpdate(data) {
 // ==================== 数据加载 ====================
 async function loadAllData() {
     try {
+        // BUG-FE-API-STATUS-01修复：所有API调用添加HTTP状态检查
         const [statsRes, graphRes, depRes, filesRes] = await Promise.allSettled([
-            fetch('/api/statistics').then(r => r.json()),
-            fetch('/api/graph').then(r => r.json()),
-            fetch('/api/dependency-graph').then(r => r.json()),
-            fetch('/api/files').then(r => r.json())
+            fetch('/api/statistics').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
+            fetch('/api/graph').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
+            fetch('/api/dependency-graph').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))),
+            fetch('/api/files').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
         ]);
 
         if (statsRes.status === 'fulfilled') AppState.statistics = statsRes.value;
@@ -302,8 +322,10 @@ function renderFileList(files) {
 
     let html = '';
     files.forEach(file => {
+        // BUG-FE-XSS-01修复：使用data属性传递路径，避免onclick中直接拼接导致XSS
+        const safePath = escapeHtml(file.path);
         html += `
-            <div class="file-item" onclick="showFileDetail('${file.path.replace(/'/g, "\\'")}')">
+            <div class="file-item" data-file-path="${safePath}" onclick="showFileDetail(this.dataset.filePath)">
                 <span class="file-language-badge ${file.language}">${file.language}</span>
                 <span class="file-path">${getShortPath(file.path)}</span>
                 <span class="file-modified">${formatTime(file.modified)}</span>
@@ -337,8 +359,13 @@ function initGraphCanvas() {
 function resizeCanvas() {
     if (!graphCanvas) return;
     const rect = graphCanvas.parentElement.getBoundingClientRect();
-    graphCanvas.width = rect.width;
-    graphCanvas.height = rect.height;
+    // BUG-FE-HIDPI-01修复：处理高DPI屏幕，避免Canvas模糊
+    const dpr = window.devicePixelRatio || 1;
+    graphCanvas.width = rect.width * dpr;
+    graphCanvas.height = rect.height * dpr;
+    graphCanvas.style.width = rect.width + 'px';
+    graphCanvas.style.height = rect.height + 'px';
+    if (graphCtx) graphCtx.scale(dpr, dpr);
     if (AppState.currentPage === 'graph') renderKnowledgeGraph();
 }
 
@@ -393,8 +420,8 @@ function stopAnimationLoop() {
 }
 
 function initializeGraphNodes(data) {
-    const width = graphCanvas.width;
-    const height = graphCanvas.height;
+    const width = graphCanvas.clientWidth || graphCanvas.width;
+    const height = graphCanvas.clientHeight || graphCanvas.height;
     graphNodes = data.nodes.map((node, i) => ({
         ...node,
         x: width / 2 + (Math.random() - 0.5) * width * 0.6,
@@ -450,8 +477,8 @@ function applyForces() {
         });
 
         // 中心引力
-        const centerX = graphCanvas.width / 2;
-        const centerY = graphCanvas.height / 2;
+        const centerX = (graphCanvas.clientWidth || graphCanvas.width) / 2;
+        const centerY = (graphCanvas.clientHeight || graphCanvas.height) / 2;
         graphNodes.forEach(node => {
             node.vx += (centerX - node.x) * 0.001;
             node.vy += (centerY - node.y) * 0.001;
@@ -466,8 +493,9 @@ function applyForces() {
 function drawGraph() {
     if (!graphCtx) return;
     const ctx = graphCtx;
-    const width = graphCanvas.width;
-    const height = graphCanvas.height;
+    // BUG-FE-HIDPI-01修复：使用CSS尺寸而非canvas像素尺寸（高DPI下后者已被放大）
+    const width = graphCanvas.clientWidth || graphCanvas.width;
+    const height = graphCanvas.clientHeight || graphCanvas.height;
 
     ctx.clearRect(0, 0, width, height);
     ctx.save();
@@ -663,7 +691,12 @@ function renderDependencyGraph() {
 async function showFileDetail(filePath) {
     try {
         const response = await fetch(`/api/file/${encodeURIComponent(filePath)}`);
+        if (!response.ok) {
+            console.error(`获取文件详情失败: HTTP ${response.status}`);
+            return;
+        }
         const details = await response.json();
+        if (!details || !details.file) return;
 
         const panel = document.getElementById('detail-panel');
         if (!panel) return;
@@ -717,9 +750,15 @@ async function analyzeStructure() {
 
     try {
         const response = await fetch('/api/analysis/structure');
+        if (!response.ok) {
+            container.innerHTML = `<div class="analysis-content" style="color:var(--danger-color);">分析请求失败 (${response.status})</div>`;
+            return;
+        }
         const data = await response.json();
         if (data.analysis) {
             container.innerHTML = `<div class="analysis-content">${escapeHtml(data.analysis)}</div>`;
+        } else if (data.error) {
+            container.innerHTML = `<div class="analysis-content" style="color:var(--danger-color);">${escapeHtml(data.error)}</div>`;
         } else {
             container.innerHTML = '<div class="analysis-content" style="color:var(--text-muted);">分析服务暂不可用</div>';
         }
@@ -729,12 +768,17 @@ async function analyzeStructure() {
 }
 
 async function analyzeDependencies() {
-    const container = document.getElementById('dependency-analysis-result');
+    // BUG-HTML-ID-01修复：AI分析页面使用独立的容器ID
+    const container = document.getElementById('ai-dependency-analysis-result');
     if (!container) return;
     container.innerHTML = '<div class="analysis-loading"><div class="loading-spinner"></div><span>正在分析依赖关系...</span></div>';
 
     try {
         const response = await fetch('/api/analysis/dependencies');
+        if (!response.ok) {
+            container.innerHTML = `<div class="analysis-content" style="color:var(--danger-color);">分析请求失败 (${response.status})</div>`;
+            return;
+        }
         const data = await response.json();
         if (data.analysis) {
             container.innerHTML = `<div class="analysis-content">${escapeHtml(data.analysis)}</div>`;
@@ -749,8 +793,16 @@ async function analyzeDependencies() {
 async function triggerFullSync() {
     try {
         const response = await fetch('/api/sync', { method: 'POST' });
+        if (!response.ok) {
+            addEventLog('error', `全量同步触发失败 (${response.status})`);
+            return;
+        }
         const data = await response.json();
-        addEventLog('sync', `手动触发全量同步: ${data.updated}个文件`);
+        if (data.error) {
+            addEventLog('error', `全量同步失败: ${data.error}`);
+        } else {
+            addEventLog('sync', `手动触发全量同步: ${data.updated}个文件`);
+        }
     } catch (error) {
         addEventLog('error', '全量同步触发失败');
     }
